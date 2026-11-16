@@ -567,6 +567,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
     async fn retries_429_then_ok_and_fires_hook() {
         let (c, m) = serve().await;
         let seen = Arc::new(Mutex::new(vec![]));
@@ -584,6 +588,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
     async fn a_429_cools_the_host_down_for_every_caller() {
         let (c, m) = serve().await;
         c.back_off("www", 2_000); // someone else's 429
@@ -597,6 +605,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
     async fn honours_retry_after() {
         let (c, _m) = serve().await;
         let seen = Arc::new(Mutex::new(vec![]));
@@ -609,6 +621,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
     async fn gives_up_after_five_429s() {
         let (c, m) = serve().await;
         let calls = Arc::new(AtomicUsize::new(0));
@@ -626,6 +642,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
     async fn per_account_cap_20_per_min() {
         let (c, _m) = serve().await;
         let t = tokio::time::Instant::now();
@@ -816,6 +836,10 @@ value",
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
     async fn retry_after_is_capped_at_a_minute() {
         let hits = Arc::new(AtomicUsize::new(0));
         let h2 = hits.clone();

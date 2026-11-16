@@ -46,8 +46,7 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
-          # paused-time tests talk to real local sockets and can time out on a slow runner: one retry
-          cargo test || cargo test
+          cargo test
 
       - name: Smoke build
         # no signing key in CI: skip updater artifacts (release.yml signs them)
