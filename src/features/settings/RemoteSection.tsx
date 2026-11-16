@@ -98,8 +98,10 @@ export function RemoteExtras() {
     void call("remote_pair_code").then(
       (c) => {
         setErr(null);
-        setNow(Date.now());
-        setCode({ code: c.code, until: Date.now() + c.expiresInSec * 1000 });
+        // one reading for both: a millisecond between two would show 5:01 for a 5:00 code
+        const at = Date.now();
+        setNow(at);
+        setCode({ code: c.code, until: at + c.expiresInSec * 1000 });
         refresh(); // codeLive turns true, so its later false hides the code
       },
       (e) => setErr(errMessage(e)),
