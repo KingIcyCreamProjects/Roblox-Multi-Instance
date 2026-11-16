@@ -2,5 +2,6 @@
 # shared with HomeLab byte for byte (hash-checked by src/features/devices/viewer.test.ts)
 public/remote-viewer/* -text
 *.png binary
+*.webp binary
 *.ico binary
 *.icns binary

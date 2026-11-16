@@ -55,6 +55,7 @@ const en = {
   "tour.back": "Back",
   "tour.next": "Next",
   "tour.start": "Start playing",
+  "tour.skip": "Skip the tutorial",
   "tour.replay": "Show tutorial again",
   "tour.welcome.title": "Welcome to RMI",
   "tour.welcome.sub": "Run several Roblox accounts at once, from one place.",
@@ -88,12 +89,20 @@ const en = {
   "tour.tabs.title": "Arrange your tabs",
   "tour.tabs.sub": "Put the pages you use most first. RMI opens on the first one.",
   "tour.friend.title": "Let a friend restart their accounts",
-  "tour.friend.sub": "One link lets a friend disconnect and reconnect the accounts you pick.",
+  "tour.friend.sub":
+    "Optional. One link lets a friend disconnect and reconnect the accounts you pick, for example when a client freezes while you are away.",
   "tour.friend.pick": "You choose the accounts",
-  "tour.friend.pickD": "Only accounts you switch on can be touched. Nothing else is shared.",
+  "tour.friend.pickD":
+    "Only accounts you switch on can be touched. Nothing else on this computer is shared.",
+  "tour.friend.browser": "Your friend only needs a browser",
+  "tour.friend.browserD":
+    "They open your link and log in with the username and password you give them. Nothing to install.",
+  "tour.friend.off": "Off until you turn it on",
+  "tour.friend.offD":
+    "The link runs through your own free Tailscale account. Without the password only the login page loads.",
   "tour.friend.where": "Set it up in Settings",
   "tour.friend.whereD":
-    "Settings > Friend remote walks you through it. Your friend does not install anything.",
+    "Settings > Friend remote walks you through it in a few minutes, whenever you want. Letting your friend add their own accounts is a separate switch there.",
   "tour.homelab.title": "See every computer in one place",
   "tour.homelab.sub": "HomeLab is an optional companion app. Skip this if you only use one PC.",
   "tour.homelab.get": "Get it from Settings",

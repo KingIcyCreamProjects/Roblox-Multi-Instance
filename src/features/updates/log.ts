@@ -20,19 +20,42 @@ export const UPDATES: Update[] = [
     date: "2026-11-16",
     title: "Public release",
     summary:
-      "RMI is now open source, with installers for Windows, macOS and Linux. Bug reports and pull requests are welcome on GitHub.",
+      "RMI runs many Roblox accounts on one computer, from one encrypted vault. This is the first public release: open source, with installers for Windows, macOS and Linux. Here is what is in it.",
     added: [
       {
-        text: "Remote access: see and control your other computers from the Devices tab, over Tailscale. Off until you switch it on.",
+        text: "Home: press Play to launch the accounts you used last, and see every running client.",
+        to: "home",
+      },
+      {
+        text: "Accounts: your accounts in an encrypted vault, sorted into groups. Each account and group remembers where it plays.",
+        to: "accounts",
+      },
+      {
+        text: "Discover: search games, browse servers by players, ping and region, and keep favorites.",
+        to: "discover",
+      },
+      {
+        text: "Automation: a local API for your own scripts. Off until you enable it.",
+        to: "automation",
+      },
+      {
+        text: "Devices: see and control your other computers over Tailscale. Off until you switch it on.",
         to: "devices",
       },
       {
         text: "Friend remote: one link lets a friend disconnect and reconnect the accounts you pick.",
         to: "friend.enabled",
       },
-      "Linux: launch, multiple clients and auto reconnect through Sober.",
-      "Friend remote shows when an account is in game on another computer, and has Select all and Clear all.",
-      "Import an encrypted vault export from Settings.",
+      {
+        text: "Auto-reconnect: a client that got disconnected rejoins without touching your mouse or keyboard.",
+        to: "watcher.reconnect",
+      },
+      {
+        text: "Anti-AFK keeps accounts in game while you are away.",
+        to: "antiAfk.enabled",
+      },
+      "Grid Arrange tiles every Roblox window on a monitor, in the order you pick.",
+      "Linux: launch, multiple clients and auto-reconnect through Sober.",
     ],
     improved: [
       {
@@ -40,9 +63,11 @@ export const UPDATES: Update[] = [
         to: "remote.files",
       },
       {
-        text: "Letting a friend add accounts now explains its limits: no 2-step verification, and Roblox checks where the login comes from.",
+        text: "Letting a friend add accounts explains its limits: no 2-step verification, and Roblox checks where the login comes from.",
         to: "friend.canAdd",
       },
+      "The tutorial explains friend remote in more detail, and you can skip it from any step.",
+      "Friend remote shows when an account is in game on another computer, and has Select all and Clear all.",
       "Smoother remote access picture with H.264 video on Windows and macOS.",
     ],
   },

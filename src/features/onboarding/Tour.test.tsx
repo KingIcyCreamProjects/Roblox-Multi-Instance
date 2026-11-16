@@ -187,6 +187,17 @@ test("Esc closes the tour and marks every step for this OS seen", async () => {
   });
 });
 
+test("Skip the tutorial ends the tour from any step but the last", async () => {
+  await call("settings_set", { patch: { onboarding: { tourDone: false, tourSeen: [] } } });
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <Tour caps={caps("windows")} />
+    </QueryClientProvider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: t("tour.skip") }));
+  await waitFor(async () => expect((await call("settings_get")).onboarding.tourDone).toBe(true));
+});
+
 test("turning reconnect on also turns the watcher on", async () => {
   await call("settings_set", {
     patch: {

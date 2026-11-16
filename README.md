@@ -4,7 +4,7 @@ RMI is a desktop app for running a bunch of your own Roblox accounts on one comp
 
 Windows 10 and 11 (x64) is the main platform. macOS and Linux builds exist with limits, listed under [Download](#download). Unofficial and not affiliated with Roblox. A Roblox update can break multi-instance at any time, and it stays broken until I patch it.
 
-<p align="center"><img src="docs/screenshots/accounts-group.png" width="800" alt="RMI main window with an account group selected and the side panel showing the group's saved destination"><br><sub>A group selected. The side panel holds its saved destination.</sub></p>
+<p align="center"><img src="docs/screenshots/home.webp" width="800" alt="RMI Home tab: the last game played with a Play button, recent games below, and the tabs Home, Accounts, Discover, Devices and Settings at the top"><br><sub>Home. Press Play to launch the accounts you used last.</sub></p>
 
 ## Why I made it
 
@@ -96,9 +96,9 @@ RMI checks GitHub for new versions and asks before installing. Updates are signe
 Grid Arrange is two steps. You put the accounts in order once (main, alt 1, alt 2...), then it offers the layouts that suit that many windows: 3 x 2 for six, one big main with small ones beside it, a cascade, and so on. Pick the monitor. Identify flashes a number on each real Roblox window so you can check which is which.
 
 <table>
-<tr><td><img src="docs/screenshots/grid-order.png" width="400" alt="Grid Arrange step one, putting accounts in order"></td><td><img src="docs/screenshots/grid-layout.png" width="400" alt="Grid Arrange step two, choosing a layout and monitor"></td></tr>
-<tr><td><img src="docs/screenshots/play-once.png" width="400" alt="Play once popover with a one-off destination"></td><td><img src="docs/screenshots/discover-servers.png" width="400" alt="Server browser in Discover with player counts, ping and regions"></td></tr>
-<tr><td><img src="docs/screenshots/discover-games.png" width="400" alt="Discover games grid with the selected game's details"></td><td><img src="docs/screenshots/settings-save-bar.png" width="400" alt="Settings with search and the unsaved changes bar"></td></tr>
+<tr><td><img src="docs/screenshots/accounts.webp" width="400" alt="Accounts tab with two groups and one account selected, its saved destination in the side panel"></td><td><img src="docs/screenshots/discover.webp" width="400" alt="Discover tab with a grid of games"></td></tr>
+<tr><td><img src="docs/screenshots/devices.webp" width="400" alt="Devices tab listing your other computers, with Pair and Connect buttons"></td><td><img src="docs/screenshots/settings.webp" width="400" alt="Settings with search and grouped sections"></td></tr>
+<tr><td><img src="docs/screenshots/grid-order.webp" width="400" alt="Grid Arrange step one, putting accounts in order"></td><td><img src="docs/screenshots/grid-layout.webp" width="400" alt="Grid Arrange step two, choosing a layout and monitor"></td></tr>
 </table>
 
 ## Things to know

@@ -5,6 +5,7 @@ import {
   Copy,
   Download,
   FolderInput,
+  Globe,
   LayoutGrid,
   Lock,
   LogIn,
@@ -521,6 +522,16 @@ export function Tour({ caps }: { caps: Capabilities }) {
                   body={t("tour.friend.pickD")}
                 />
                 <Item
+                  icon={<Globe size={18} aria-hidden />}
+                  title={t("tour.friend.browser")}
+                  body={t("tour.friend.browserD")}
+                />
+                <Item
+                  icon={<ShieldCheck size={18} aria-hidden />}
+                  title={t("tour.friend.off")}
+                  body={t("tour.friend.offD")}
+                />
+                <Item
                   icon={<SettingsIcon size={18} aria-hidden />}
                   title={t("tour.friend.where")}
                   body={t("tour.friend.whereD")}
@@ -579,6 +590,15 @@ export function Tour({ caps }: { caps: Capabilities }) {
                 {t(last ? "tour.start" : "tour.next")}
               </Button>
             </div>
+            {!last && (
+              <button
+                type="button"
+                className="self-center rounded-control px-2 py-1 text-13 text-text-2 underline-offset-2 hover:text-text-1 hover:underline"
+                onClick={done}
+              >
+                {t("tour.skip")}
+              </button>
+            )}
             {step === "perf" && (
               <p className="text-center text-13 text-text-3">{t("tour.perf.note")}</p>
             )}

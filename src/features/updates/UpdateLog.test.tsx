@@ -82,11 +82,11 @@ test("Show me closes the log and opens the tab or the settings row", () => {
   useUpdateLog.setState({ open: true, pick: "1.0.0" });
   render(<UpdateLog />);
   const btns = () => screen.getAllByRole("button", { name: "Show me" });
-  fireEvent.click(btns()[0]!); // Remote access
+  fireEvent.click(btns()[0]!); // Home
   expect(useUpdateLog.getState().open).toBe(false);
-  expect(useUi.getState().route).toBe("devices");
+  expect(useUi.getState().route).toBe("home");
   act(() => useUpdateLog.setState({ open: true }));
-  fireEvent.click(btns()[1]!); // Friend remote
+  fireEvent.click(btns()[5]!); // Friend remote
   expect(useUi.getState()).toMatchObject({
     route: "settings",
     settingsJump: "friend.enabled",
