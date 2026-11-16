@@ -62,7 +62,9 @@ function boot(status: string, uptimeSec: number | null, token = true) {
         : json({});
     }
     if (path === "/v1/accounts") return listError ? listError.clone() : json([acc]);
-    return new Response(new Blob(["png"]), { status: 200 }); // avatar
+    // avatar. Not a real Response: reading a Blob body needs real I/O ticks on Node 22,
+    // which the fake timers never run, so the image would not mount in time.
+    return { ok: true, status: 200, blob: async () => new Blob(["png"]) } as unknown as Response;
   });
   new Function(appJs)();
 }
