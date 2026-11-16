@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-homelab-download"
+description = "Enables the homelab_download command without any pre-configured scope."
+commands.allow = ["homelab_download"]
+
+[[permission]]
+identifier = "deny-homelab-download"
+description = "Denies the homelab_download command without any pre-configured scope."
+commands.deny = ["homelab_download"]

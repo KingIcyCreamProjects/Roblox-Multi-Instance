@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tool-friend-request"
+description = "Enables the tool_friend_request command without any pre-configured scope."
+commands.allow = ["tool_friend_request"]
+
+[[permission]]
+identifier = "deny-tool-friend-request"
+description = "Denies the tool_friend_request command without any pre-configured scope."
+commands.deny = ["tool_friend_request"]

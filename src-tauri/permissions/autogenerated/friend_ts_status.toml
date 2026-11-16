@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friend-ts-status"
+description = "Enables the friend_ts_status command without any pre-configured scope."
+commands.allow = ["friend_ts_status"]
+
+[[permission]]
+identifier = "deny-friend-ts-status"
+description = "Denies the friend_ts_status command without any pre-configured scope."
+commands.deny = ["friend_ts_status"]

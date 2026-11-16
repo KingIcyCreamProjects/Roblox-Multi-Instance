@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-destination-resolve"
+description = "Enables the destination_resolve command without any pre-configured scope."
+commands.allow = ["destination_resolve"]
+
+[[permission]]
+identifier = "deny-destination-resolve"
+description = "Denies the destination_resolve command without any pre-configured scope."
+commands.deny = ["destination_resolve"]

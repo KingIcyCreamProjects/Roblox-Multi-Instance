@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-automation-save-console"
+description = "Enables the automation_save_console command without any pre-configured scope."
+commands.allow = ["automation_save_console"]
+
+[[permission]]
+identifier = "deny-automation-save-console"
+description = "Denies the automation_save_console command without any pre-configured scope."
+commands.deny = ["automation_save_console"]

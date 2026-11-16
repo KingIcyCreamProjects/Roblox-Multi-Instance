@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-peers"
+description = "Enables the remote_peers command without any pre-configured scope."
+commands.allow = ["remote_peers"]
+
+[[permission]]
+identifier = "deny-remote-peers"
+description = "Denies the remote_peers command without any pre-configured scope."
+commands.deny = ["remote_peers"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-automation-token-regenerate"
+description = "Enables the automation_token_regenerate command without any pre-configured scope."
+commands.allow = ["automation_token_regenerate"]
+
+[[permission]]
+identifier = "deny-automation-token-regenerate"
+description = "Denies the automation_token_regenerate command without any pre-configured scope."
+commands.deny = ["automation_token_regenerate"]

@@ -1,0 +1,163 @@
+/* RMI design tokens. Three layers: primitive → semantic (per theme) → component.
+   Components and Tailwind utilities only ever read semantic/component tokens.
+   Look: neutral graphite acrylic, hairlines, ONE blue accent. */
+
+/* ── Primitives ─────────────────────────────────────────────── */
+:root {
+  /* neutral graphite and paper (no hue: the glass picks up the desktop, the accent does the rest) */
+  --p-white: 255 255 255;
+  --p-black: 0 0 0;
+  --p-graphite: 20 21 25;
+  --p-paper: 246 247 250;
+  /* the one accent */
+  --p-blue-300: #8fb0ff;
+  --p-blue-400: #4c85ff;
+  --p-blue-500: #3b78ff;
+  --p-blue-600: #2f66e0;
+  --p-blue-700: #1f4fc4;
+  /* status */
+  --p-emerald: oklch(0.8 0.17 155);
+  --p-emerald-deep: oklch(0.52 0.15 156);
+  --p-azure: oklch(0.74 0.13 235);
+  --p-azure-deep: oklch(0.48 0.15 252);
+  --p-tangerine: oklch(0.76 0.15 58);
+  --p-tangerine-deep: oklch(0.5 0.16 50);
+  --p-amber: oklch(0.83 0.14 82);
+  --p-amber-deep: oklch(0.48 0.13 70);
+  --p-red: oklch(0.69 0.18 24);
+  --p-red-deep: oklch(0.5 0.2 26);
+  /* account tag swatches (fixed palette of 8) */
+  --tag-1: oklch(0.72 0.17 25);
+  --tag-2: oklch(0.78 0.15 60);
+  --tag-3: oklch(0.86 0.15 95);
+  --tag-4: oklch(0.76 0.16 150);
+  --tag-5: oklch(0.76 0.12 200);
+  --tag-6: oklch(0.7 0.14 250);
+  --tag-7: oklch(0.7 0.16 310);
+  --tag-8: oklch(0.8 0.02 255);
+
+  /* type */
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Geist Variable", system-ui,
+    sans-serif;
+  --font-data: "Geist Mono Variable", ui-monospace, "Cascadia Mono", monospace;
+  --fs-12: 0.75rem;
+  --fs-13: 0.8125rem;
+  --fs-14: 0.875rem;
+  --fs-16: 1rem;
+  --fs-20: 1.25rem;
+  --fs-28: 1.75rem;
+  --fs-44: 2.75rem;
+  --fs-64: 4rem;
+
+  /* shape: 8px controls in panels, 12px panels, pills only on floating capsule bars */
+  --r-panel: 12px;
+  --r-control: 8px;
+  --r-chip: 6px;
+  --r-pill: 999px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-quick: 120ms;
+  --dur-base: 180ms;
+  --dur-hero: 350ms;
+}
+
+/* ── Semantic: dark (default, hero) ─────────────────────────── */
+/* Surfaces are translucent veils over the window glass, so every screen shows the acrylic. */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: rgb(
+    var(--p-graphite) / 0.82
+  ); /* only where something must stay readable (sticky headers) */
+  --surface-1: rgb(var(--p-white) / 0.04); /* inputs, inset wells */
+  --surface-2: rgb(var(--p-white) / 0.06); /* panels */
+  --surface-3: rgb(var(--p-white) / 0.1); /* controls, hover rows */
+  --surface-4: rgb(var(--p-white) / 0.15); /* pressed, selected row */
+  --field: rgb(0 0 0 / 0.25); /* text field wells */
+  --glass: rgb(30 31 36 / 0.86); /* menus, sheets, popovers, toasts: less clear than panels */
+  --glass-panel: rgb(30 31 36 / 0.62); /* side panel, floating bars */
+  --hairline: rgb(var(--p-white) / 0.1);
+  --hairline-strong: rgb(var(--p-white) / 0.16);
+  --rim: rgb(var(--p-white) / 0.75);
+  --sheen: rgb(var(--p-white) / 0.18);
+  --win-tint: linear-gradient(160deg, rgb(40 42 48 / 0.68), rgb(14 15 18 / 0.78));
+  --text-1: rgb(255 255 255 / 0.97);
+  --text-2: rgb(232 234 240 / 0.72);
+  --text-3: rgb(232 234 240 / 0.58);
+  --accent: var(--p-blue-500);
+  --accent-hover: var(--p-blue-400);
+  --accent-press: var(--p-blue-600);
+  --accent-ink: #fff; /* text on accent */
+  --accent-text: var(--p-blue-300); /* accent used as text/ring */
+  --selection-bg: rgb(59 120 255 / 0.4);
+  --status-online: var(--p-emerald);
+  --status-ingame: var(--p-azure);
+  --status-studio: var(--p-tangerine);
+  --status-warn: var(--p-amber);
+  --status-error: var(--p-red);
+  --shadow-float: 0 14px 36px oklch(0 0 0 / 0.4);
+  --scrim: oklch(0.1 0.005 255 / 0.5);
+  --skeleton: oklch(1 0 0 / 0.06);
+}
+
+/* ── Semantic: light (secondary) ────────────────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: rgb(var(--p-paper) / 0.88);
+  --surface-1: rgb(var(--p-black) / 0.04);
+  --surface-2: rgb(var(--p-white) / 0.5);
+  --surface-3: rgb(var(--p-black) / 0.07);
+  --surface-4: rgb(var(--p-black) / 0.12);
+  --field: rgb(255 255 255 / 0.6);
+  --glass: rgb(250 250 252 / 0.92);
+  --glass-panel: rgb(255 255 255 / 0.58);
+  --hairline: rgb(var(--p-black) / 0.1);
+  --hairline-strong: rgb(var(--p-black) / 0.18);
+  --rim: rgb(var(--p-white) / 0.95);
+  --sheen: rgb(var(--p-white) / 0.6);
+  --win-tint: linear-gradient(160deg, rgb(250 251 253 / 0.72), rgb(232 235 242 / 0.8));
+  --text-1: oklch(0.2 0.01 255);
+  --text-2: oklch(0.38 0.012 255);
+  --text-3: oklch(0.46 0.012 255);
+  --accent: var(--p-blue-500);
+  --accent-hover: var(--p-blue-400);
+  --accent-press: var(--p-blue-600);
+  --accent-ink: #fff;
+  --accent-text: var(--p-blue-700);
+  --selection-bg: rgb(59 120 255 / 0.28);
+  --status-online: var(--p-emerald-deep);
+  --status-ingame: var(--p-azure-deep);
+  --status-studio: var(--p-tangerine-deep);
+  --status-warn: var(--p-amber-deep);
+  --status-error: var(--p-red-deep);
+  --shadow-float: 0 14px 36px oklch(0.2 0.02 255 / 0.2);
+  --scrim: oklch(0.2 0.01 255 / 0.25);
+  --skeleton: oklch(0.2 0.01 255 / 0.07);
+}
+
+/* ── Component ──────────────────────────────────────────────── */
+/* Sizes are rem so the UI scale setting (html font-size) grows them with the text. */
+:root {
+  --titlebar-h: 4rem;
+  --playbar-h: 6rem; /* floating bar + its margin: toasts sit above it */
+  --row-h: 3rem;
+  --control-h: 2rem;
+  --focus-ring: 0 0 0 2px rgb(var(--p-graphite) / 0.9), 0 0 0 4px var(--accent-text);
+  --shadow-panel: 0 14px 36px oklch(0 0 0 / 0.3);
+  /* text and controls laid over game imagery: same in both themes */
+  --on-image: oklch(0.97 0.004 255);
+  --on-image-2: oklch(0.86 0.006 255);
+  --on-image-hover: oklch(1 0 0 / 0.16);
+  --image-scrim: oklch(0.13 0.008 255 / 0.78);
+}
+:root[data-density="compact"] {
+  --row-h: 2.5rem;
+  --control-h: 1.75rem;
+}
+/* light glass: a paper inner band instead of graphite, and a softer panel shadow */
+:root[data-theme="light"] {
+  --focus-ring: 0 0 0 2px rgb(var(--p-paper) / 0.95), 0 0 0 4px var(--accent-text);
+  --shadow-panel: 0 14px 36px oklch(0.2 0.02 255 / 0.14);
+}

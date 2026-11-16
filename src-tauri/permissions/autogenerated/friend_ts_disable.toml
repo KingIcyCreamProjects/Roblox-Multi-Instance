@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friend-ts-disable"
+description = "Enables the friend_ts_disable command without any pre-configured scope."
+commands.allow = ["friend_ts_disable"]
+
+[[permission]]
+identifier = "deny-friend-ts-disable"
+description = "Denies the friend_ts_disable command without any pre-configured scope."
+commands.deny = ["friend_ts_disable"]

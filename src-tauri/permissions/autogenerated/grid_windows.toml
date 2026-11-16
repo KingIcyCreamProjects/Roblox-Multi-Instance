@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-grid-windows"
+description = "Enables the grid_windows command without any pre-configured scope."
+commands.allow = ["grid_windows"]
+
+[[permission]]
+identifier = "deny-grid-windows"
+description = "Denies the grid_windows command without any pre-configured scope."
+commands.deny = ["grid_windows"]

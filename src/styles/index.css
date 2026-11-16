@@ -1,0 +1,386 @@
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-4: var(--surface-4);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-glass: var(--glass);
+  --color-field: var(--field);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-press: var(--accent-press);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-text: var(--accent-text);
+  --color-online: var(--status-online);
+  --color-ingame: var(--status-ingame);
+  --color-studio: var(--status-studio);
+  --color-warn: var(--status-warn);
+  --color-error: var(--status-error);
+  --color-on-image: var(--on-image);
+  --color-on-image-2: var(--on-image-2);
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-data);
+  --text-12: var(--fs-12);
+  --text-13: var(--fs-13);
+  --text-14: var(--fs-14);
+  --text-16: var(--fs-16);
+  --text-20: var(--fs-20);
+  --text-28: var(--fs-28);
+  --text-44: var(--fs-44);
+  --text-64: var(--fs-64);
+  --radius-panel: var(--r-panel);
+  --radius-control: var(--r-control);
+  --radius-chip: var(--r-chip);
+  --shadow-float: var(--shadow-float);
+  --ease-out: var(--ease-out);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    background: transparent;
+  }
+  /* browser dev build: no acrylic, so fake the desktop behind the window */
+  :root:not([data-native]) body {
+    background:
+      radial-gradient(60% 50% at 20% 25%, oklch(0.62 0.16 145 / 0.8), transparent 70%),
+      radial-gradient(55% 55% at 80% 70%, oklch(0.6 0.15 45 / 0.75), transparent 70%), #0b0c0f;
+  }
+  html {
+    font-size: calc(16px * var(--ui-scale, 1));
+  }
+  /* lucide sizes are px attributes: scale them with the UI scale like the rem text */
+  svg.lucide {
+    zoom: var(--ui-scale, 1);
+  }
+  body {
+    margin: 0;
+    background: transparent; /* the window is acrylic (Tauri) or .app-win's own backdrop (browser) */
+    color: var(--text-1);
+    font-family: var(--font-ui);
+    font-size: var(--fs-14);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    caret-color: var(--accent-text);
+    overflow: hidden;
+    user-select: none;
+  }
+  /* native checkboxes and radios take the accent instead of browser blue */
+  :root {
+    accent-color: var(--accent);
+  }
+  /* WebView2 draws native select lists on white and ignores color-scheme, while options inherit
+     our white text: give them an opaque themed surface. */
+  option,
+  optgroup {
+    background: rgb(var(--p-graphite));
+    color: rgb(var(--p-white));
+  }
+  :root[data-theme="light"] :is(option, optgroup) {
+    background: rgb(var(--p-paper));
+    color: rgb(var(--p-black));
+  }
+  ::selection {
+    background: var(--selection-bg);
+    color: var(--text-1);
+  }
+  input,
+  textarea,
+  [data-selectable] {
+    user-select: text;
+  }
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline: 2px solid Highlight;
+      outline-offset: 2px;
+    }
+  }
+  /* thin, palette-tinted scrollbars that only show on hover/scroll */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  *:hover,
+  *:focus-within {
+    scrollbar-color: var(--hairline-strong) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *:hover::-webkit-scrollbar-thumb {
+    background-color: var(--hairline-strong);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Window material. Real blur is the Windows acrylic effect; this adds only the graphite tint,
+   specular rim, top sheen and grain. In the browser (no acrylic) it also blurs the fake desktop. */
+.app-win {
+  position: relative;
+  isolation: isolate;
+  height: 100%;
+  overflow: hidden;
+  background: var(--win-tint);
+  border-radius: var(--win-r, 0);
+  box-shadow: inset 0 0 26px rgb(var(--p-white) / 0.05);
+}
+:root:not([data-native]) .app-win {
+  --win-r: 12px;
+  backdrop-filter: blur(48px) saturate(1.2);
+  box-shadow:
+    inset 0 0 26px rgb(var(--p-white) / 0.05),
+    0 30px 80px rgb(0 0 0 / 0.55);
+}
+:root[data-native][data-os="windows"] .app-win {
+  --win-r: 8px; /* Windows 11 rounds frameless windows by 8px */
+}
+/* Transparency effects off (app_info.acrylic false): the window is see-through, so tint an opaque base */
+:root[data-native]:not([data-acrylic]) .app-win {
+  background: var(--win-tint), Canvas;
+}
+.app-win::before {
+  /* specular rim */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  z-index: 60;
+  background: linear-gradient(
+    150deg,
+    var(--rim),
+    rgb(var(--p-white) / 0.14) 28%,
+    rgb(var(--p-white) / 0.04) 62%,
+    rgb(var(--p-white) / 0.42)
+  );
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+.app-win::after {
+  /* top sheen */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: -1;
+  background: radial-gradient(120% 34% at 18% -4%, var(--sheen), transparent 70%);
+}
+.grain {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.07;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+}
+
+/* Selects: one glass chevron on every OS instead of the Chromium / Aqua / GTK arrow.
+   Unlayered so the padding beats px-* utilities. */
+select:not([multiple]) {
+  appearance: none;
+  padding-right: 2rem;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-2) 50%),
+    linear-gradient(135deg, var(--text-2) 50%, transparent 50%);
+  background-position:
+    calc(100% - 1.05rem) 52%,
+    calc(100% - 0.75rem) 52%;
+  background-size: 0.3rem 0.3rem;
+  background-repeat: no-repeat;
+}
+
+/* Glass: menus, sheets, popovers, toasts. Same acrylic as the window, slightly less clear. */
+.glass {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(30px) saturate(1.2);
+  backdrop-filter: blur(30px) saturate(1.2);
+  box-shadow:
+    inset 0 0 0 1px var(--hairline-strong),
+    inset 0 1px 0 rgb(var(--p-white) / 0.2),
+    var(--shadow-float);
+}
+/* Panels and floating capsule bars: the lighter glass. */
+.glass-panel {
+  background: var(--glass-panel);
+  -webkit-backdrop-filter: blur(30px) saturate(1.2);
+  backdrop-filter: blur(30px) saturate(1.2);
+  box-shadow:
+    inset 0 0 0 1px var(--hairline-strong),
+    inset 0 1px 0 rgb(var(--p-white) / 0.24),
+    var(--shadow-panel);
+}
+
+/* Settings slider: accent fill up to the value (--fill), neutral track, light thumb with a real shadow.
+   The native track picked its own dark grey against a light accent. */
+.range {
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(var(--accent), var(--accent)) 0 / var(--fill, 0%) 100% no-repeat,
+    var(--surface-4);
+}
+.range::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--on-image);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.35);
+  transition: transform var(--dur-quick) var(--ease-out);
+}
+:root[data-theme="light"] .range::-webkit-slider-thumb {
+  background: rgb(var(--p-graphite));
+}
+.range:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+.range:focus-visible {
+  box-shadow: none;
+}
+.range:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--focus-ring);
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Privacy mode: names and avatars blur (title-bar eye, Ctrl/Cmd+Shift+H). */
+:root[data-privacy="on"] [data-pii] {
+  filter: blur(6px);
+}
+
+/* Account list: the grid holds focus; the keyboard-cursor row shows the ring. */
+.accounts-grid:focus-visible,
+.servers-grid:focus-visible {
+  box-shadow: none;
+}
+.accounts-grid:focus-visible:not([data-mouse]) .row-active,
+.servers-grid:focus-visible .row-active {
+  box-shadow: inset 0 0 0 2px var(--accent-text);
+}
+
+/* Sheets and menus: quiet 120-180 ms fade/slide (Radix waits for the exit animation). */
+.sheet-fade[data-state="open"] {
+  animation: fade-in var(--dur-base) var(--ease-out);
+}
+.sheet-fade[data-state="closed"] {
+  animation: fade-in var(--dur-quick) reverse ease-in;
+}
+.sheet-slide[data-state="open"] {
+  animation: sheet-in var(--dur-base) var(--ease-out);
+}
+.sheet-slide[data-state="closed"] {
+  animation: sheet-in var(--dur-quick) reverse ease-in;
+}
+.sheet-pop[data-state="open"] {
+  animation: pop-in var(--dur-base) var(--ease-out);
+}
+.sheet-pop[data-state="closed"] {
+  animation: pop-in var(--dur-quick) reverse ease-in;
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    /* centring comes from the separate `translate` property (Tailwind 4): only the nudge here */
+    transform: translateY(2%) scale(0.97);
+  }
+}
+.menu[data-state="open"] {
+  animation: menu-in var(--dur-quick) var(--ease-out);
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduced-motion="off"]) *,
+  :root:not([data-reduced-motion="off"]) *::before,
+  :root:not([data-reduced-motion="off"]) *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+:root[data-reduced-motion="on"] *,
+:root[data-reduced-motion="on"] *::before,
+:root[data-reduced-motion="on"] *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 1ms !important;
+}
+:root[data-theme-switching] *,
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
+}
+
+/* The shared remote viewer (public/remote-viewer/) in RMI's tokens. */
+:root {
+  --rv-bg: var(--bg);
+  --rv-panel: var(--glass);
+  --rv-border: var(--hairline-strong);
+  --rv-text: var(--text-1);
+  --rv-muted: var(--text-2);
+  --rv-accent: var(--accent);
+  --rv-danger: var(--status-error);
+  --rv-radius: var(--r-control);
+  --rv-font: var(--font-ui);
+  --rv-fs: var(--fs-13);
+  --rv-control-h: var(--control-h);
+  --rv-mono: var(--font-data);
+  --rv-ok: var(--status-online);
+  --rv-warn: var(--status-warn);
+  --rv-on-accent: var(--accent-ink);
+}
+/* touch screens: the viewer's 44 px targets, not the desktop control height */
+@media (pointer: coarse) {
+  :root {
+    --rv-control-h: 2.75rem;
+  }
+}

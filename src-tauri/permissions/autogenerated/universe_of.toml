@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-universe-of"
+description = "Enables the universe_of command without any pre-configured scope."
+commands.allow = ["universe_of"]
+
+[[permission]]
+identifier = "deny-universe-of"
+description = "Denies the universe_of command without any pre-configured scope."
+commands.deny = ["universe_of"]

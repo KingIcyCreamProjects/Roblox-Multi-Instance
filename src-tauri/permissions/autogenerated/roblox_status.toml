@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-roblox-status"
+description = "Enables the roblox_status command without any pre-configured scope."
+commands.allow = ["roblox_status"]
+
+[[permission]]
+identifier = "deny-roblox-status"
+description = "Denies the roblox_status command without any pre-configured scope."
+commands.deny = ["roblox_status"]

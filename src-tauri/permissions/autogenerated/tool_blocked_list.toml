@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tool-blocked-list"
+description = "Enables the tool_blocked_list command without any pre-configured scope."
+commands.allow = ["tool_blocked_list"]
+
+[[permission]]
+identifier = "deny-tool-blocked-list"
+description = "Denies the tool_blocked_list command without any pre-configured scope."
+commands.deny = ["tool_blocked_list"]

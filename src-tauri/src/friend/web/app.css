@@ -1,0 +1,280 @@
+/* RMI Remote: same glass family as the desktop app (tokens.css values). No inline styles, no data: URLs (CSP). */
+:root {
+  color-scheme: dark;
+  --graphite: 20 21 25;
+  --surface-3: rgb(255 255 255 / 0.1);
+  --surface-4: rgb(255 255 255 / 0.15);
+  --field: rgb(0 0 0 / 0.25);
+  --glass: rgb(16 19 28 / 0.78);
+  --glass-panel: rgb(26 30 42 / 0.6);
+  --hairline: rgb(255 255 255 / 0.1);
+  --hairline-strong: rgb(255 255 255 / 0.16);
+  --text-1: rgb(255 255 255 / 0.97);
+  --text-2: rgb(232 234 240 / 0.84);
+  --text-3: rgb(232 234 240 / 0.74);
+  --accent: #2f66e0;
+  --accent-hover: #4c85ff;
+  --accent-press: #1f4fc4;
+  --accent-text: #8fb0ff;
+  --ingame: oklch(0.74 0.13 235);
+  --online: oklch(0.8 0.17 155);
+  --warn: oklch(0.83 0.14 82);
+  --error: oklch(0.78 0.15 24);
+  --blur: blur(30px) saturate(1.2);
+  --shadow-float: 0 14px 36px oklch(0 0 0 / 0.4);
+  --focus-ring: 0 0 0 2px rgb(var(--graphite) / 0.9), 0 0 0 4px var(--accent-text);
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { background: #07090f; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  color: var(--text-1);
+  font: 0.875rem/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  /* the top inset lives on the sticky header, so it never scrolls away from under the status bar */
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+/* soft dark blue glow the glass blurs: three blurred blobs in the accent family, drifting
+   slowly. Fixed layers: a body background would stretch with the page (and iOS ignores
+   background-attachment: fixed). Oversized so the drift never shows an edge. */
+body::before, body::after {
+  content: "";
+  position: fixed;
+  inset: -15%;
+  z-index: -1;
+  pointer-events: none;
+  filter: blur(48px);
+  will-change: transform;
+}
+body::before {
+  background:
+    radial-gradient(38% 30% at 22% 18%, oklch(0.56 0.18 262 / 0.62), transparent 70%),
+    radial-gradient(40% 32% at 82% 78%, oklch(0.52 0.18 292 / 0.5), transparent 70%);
+  animation: drift-a 38s ease-in-out infinite alternate;
+}
+body::after {
+  background: radial-gradient(34% 26% at 70% 34%, oklch(0.6 0.13 235 / 0.34), transparent 70%);
+  animation: drift-b 52s ease-in-out infinite alternate;
+}
+@keyframes drift-a { to { transform: translate3d(6%, 5%, 0) scale(1.06); } }
+@keyframes drift-b { to { transform: translate3d(-8%, 7%, 0) scale(0.94); } }
+:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+h1, h2, p, ul { margin: 0; padding: 0; }
+
+/* full-bleed glass bar, content lined up with main's 480px column */
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(14px + env(safe-area-inset-top)) max(16px, calc((100% - 448px) / 2)) 10px;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  box-shadow: inset 0 -1px 0 var(--hairline);
+}
+.logo { border-radius: 8px; }
+.title { flex: 1; min-width: 0; }
+h1 { font-size: 1.25rem; font-weight: 600; line-height: 1.2; }
+.updated { font-size: 0.75rem; color: var(--text-3); }
+main { max-width: 480px; margin: 0 auto; padding: 12px 16px 32px; display: grid; gap: 12px; }
+/* grid tracks never grow past the screen: a long game name or @username ellipsizes instead */
+main, .list, .card { grid-template-columns: minmax(0, 1fr); }
+
+/* the lighter glass: panels and cards */
+.panel, .card {
+  background: var(--glass-panel);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--hairline-strong), inset 0 1px 0 rgb(255 255 255 / 0.24), 0 14px 36px oklch(0 0 0 / 0.3);
+}
+.list { list-style: none; display: grid; gap: 12px; }
+.card { padding: 14px; display: grid; gap: 12px; transition: opacity 180ms var(--ease); }
+.card.busy { opacity: 0.72; }
+.list.stale .card > :not(.note) { opacity: 0.6; }
+
+.head { display: flex; align-items: center; gap: 12px; }
+.av {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  font-size: 1.125rem;
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+.who { flex: 1; min-width: 0; }
+.name { font-size: 1rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { font-size: 0.8125rem; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  min-height: 26px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: rgb(0 0 0 / 0.25);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text-2);
+}
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.pill[data-s="inGame"]::before { background: var(--ingame); }
+.pill[data-s="inGame"] { color: var(--ingame); }
+.pill[data-s="online"]::before { background: var(--online); }
+.pill[data-s="online"] { color: var(--online); }
+.pill[data-s="paused"]::before { background: var(--warn); }
+.pill[data-s="paused"] { color: var(--warn); }
+.detail { font-size: 0.8125rem; color: var(--text-2); display: flex; justify-content: space-between; gap: 12px; }
+.detail span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.detail span:last-child { flex: none; } /* only the game name ellipsizes, never the uptime */
+
+.acts { display: grid; gap: 8px; }
+.note { font-size: 0.8125rem; color: var(--text-2); display: flex; align-items: center; gap: 8px; }
+.note.err { color: var(--error); }
+
+label { display: block; font-size: 0.8125rem; color: var(--text-2); margin: 12px 0 6px; }
+input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 1rem; /* 16px: no iOS zoom */
+  color: var(--text-1);
+  background: var(--field);
+  border: 0;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+input::placeholder { color: var(--text-3); }
+input:focus-visible { box-shadow: inset 0 0 0 1px var(--accent-text), var(--focus-ring); }
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 46px;
+  padding: 0 16px;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-1);
+  background: var(--surface-3);
+  border: 0;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--hairline-strong), inset 0 1px 0 rgb(255 255 255 / 0.12);
+  cursor: pointer;
+  transition: background 120ms var(--ease), transform 120ms var(--ease);
+}
+.btn:active:not(:disabled) { background: var(--surface-4); transform: scale(0.99); }
+.btn.accent { background: var(--accent); color: #fff; box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25); }
+.btn.accent:active:not(:disabled) { background: var(--accent-press); }
+.btn.danger { color: var(--error); }
+.btn:disabled { cursor: default; opacity: 0.85; }
+.btn.accent:disabled { opacity: 0.6; }
+/* after the .btn shadows, which would otherwise hide the ring */
+.btn:focus-visible { box-shadow: var(--focus-ring); }
+.login .btn { margin-top: 18px; }
+.link {
+  min-height: 44px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--accent-text);
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.acts .link { justify-self: center; }
+
+.spin {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.login { padding: 20px 18px 22px; margin-top: 8vh; }
+.login h2 { font-size: 1.75rem; font-weight: 600; line-height: 1.2; }
+.hint { color: var(--text-2); margin-top: 4px; }
+.login .note { margin-top: 12px; }
+.banner {
+  padding: 10px 14px;
+  border-radius: 12px;
+  color: var(--warn);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+}
+.empty { text-align: center; color: var(--text-2); padding: 40px 0; }
+.empty .spin { display: inline-block; vertical-align: -3px; margin-right: 8px; }
+
+/* confirm sheet: the stronger glass, bottom-anchored */
+.sheet {
+  width: min(100%, 480px);
+  max-width: none;
+  margin: auto auto 0;
+  padding: 0 0 env(safe-area-inset-bottom);
+  color: var(--text-1);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 0;
+  border-radius: 16px 16px 0 0;
+  box-shadow: inset 0 0 0 1px var(--hairline-strong), inset 0 1px 0 rgb(255 255 255 / 0.2), var(--shadow-float);
+}
+.sheet[open] { animation: up 180ms var(--ease); }
+.sheet::backdrop { background: oklch(0.1 0.005 255 / 0.5); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.sheet-body { padding: 20px 16px 16px; display: grid; gap: 8px; }
+.sheet h2 { font-size: 1.25rem; font-weight: 600; }
+.sheet p { color: var(--text-2); }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+@keyframes up { from { opacity: 0; transform: translateY(24px); } }
+
+/* add account sheet: the Quick Log In code as large spaced text (no Roblox image: CSP) */
+.steps { margin: 4px 0 0; padding-left: 1.4em; color: var(--text-2); display: grid; gap: 4px; }
+.code {
+  min-height: 3.75rem;
+  padding: 10px 0 6px 0.3em; /* left pad: letter-spacing trails the last letter */
+  font: 700 2.25rem/1.2 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  letter-spacing: 0.3em;
+  text-align: center;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.sheet .code { color: var(--text-1); }
+.sheet .note.err { color: var(--error); }
+.sheet .fine { font-size: 0.75rem; color: var(--text-3); }
+.sheet .acts { margin-top: 8px; }
+.sheet h2:focus-visible { box-shadow: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  body::before, body::after { animation: none !important; }
+  /* a frozen 3/4 ring reads as broken: a full ring that gently pulses instead */
+  .spin { border-right-color: currentColor; animation: pulse 1.6s ease-in-out infinite !important; }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+}

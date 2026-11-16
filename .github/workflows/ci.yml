@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main] # other branches get checked through PRs; tags run these inside release.yml
+  pull_request:
+  workflow_call: # release.yml runs the same checks first
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Frontend
+        run: |
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+
+      - name: Rust fmt + clippy + test
+        working-directory: src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Smoke build
+        # no signing key in CI: skip updater artifacts (release.yml signs them)
+        shell: bash
+        run: pnpm tauri build --debug -c '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: E2E smoke (Windows, reuses the debug build above)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: pnpm exec wdio run e2e/wdio.conf.js

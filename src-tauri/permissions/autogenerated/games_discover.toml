@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-games-discover"
+description = "Enables the games_discover command without any pre-configured scope."
+commands.allow = ["games_discover"]
+
+[[permission]]
+identifier = "deny-games-discover"
+description = "Denies the games_discover command without any pre-configured scope."
+commands.deny = ["games_discover"]

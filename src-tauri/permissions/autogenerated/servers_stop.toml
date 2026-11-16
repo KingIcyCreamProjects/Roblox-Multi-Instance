@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-servers-stop"
+description = "Enables the servers_stop command without any pre-configured scope."
+commands.allow = ["servers_stop"]
+
+[[permission]]
+identifier = "deny-servers-stop"
+description = "Denies the servers_stop command without any pre-configured scope."
+commands.deny = ["servers_stop"]

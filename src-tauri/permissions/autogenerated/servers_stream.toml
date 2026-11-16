@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-servers-stream"
+description = "Enables the servers_stream command without any pre-configured scope."
+commands.allow = ["servers_stream"]
+
+[[permission]]
+identifier = "deny-servers-stream"
+description = "Denies the servers_stream command without any pre-configured scope."
+commands.deny = ["servers_stream"]

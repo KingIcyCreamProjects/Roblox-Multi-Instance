@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tool-signout-others"
+description = "Enables the tool_signout_others command without any pre-configured scope."
+commands.allow = ["tool_signout_others"]
+
+[[permission]]
+identifier = "deny-tool-signout-others"
+description = "Denies the tool_signout_others command without any pre-configured scope."
+commands.deny = ["tool_signout_others"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cookie-lock-set"
+description = "Enables the cookie_lock_set command without any pre-configured scope."
+commands.allow = ["cookie_lock_set"]
+
+[[permission]]
+identifier = "deny-cookie-lock-set"
+description = "Denies the cookie_lock_set command without any pre-configured scope."
+commands.deny = ["cookie_lock_set"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accounts-undo-remove"
+description = "Enables the accounts_undo_remove command without any pre-configured scope."
+commands.allow = ["accounts_undo_remove"]
+
+[[permission]]
+identifier = "deny-accounts-undo-remove"
+description = "Denies the accounts_undo_remove command without any pre-configured scope."
+commands.deny = ["accounts_undo_remove"]

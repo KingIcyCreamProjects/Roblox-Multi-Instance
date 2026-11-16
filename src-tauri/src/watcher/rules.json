@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "_note": "Best-effort regexes (case-insensitive) matched per Roblox client log line, written against client 0.744 logs. Roblox can change its wording at any time. To update without a release, put a copy of this file at <data>/watcher-rules.json. Check order: disconnected, left, joined. Chat-socket lines ([DFLog::SignalRCoreError] ... Disconnected) are deliberately not matched.",
+  "joined": [
+    "\\[FLog::Output\\] ! Joining game '[0-9a-f-]+' place \\d+ at ",
+    "\\[DFLog::NetworkClient\\] Connection accepted from ",
+    "\\[FLog::Network\\] Replicator created for player "
+  ],
+  "left": [
+    "\\[DFLog::NetworkClient\\] Client:Disconnect\\b"
+  ],
+  "disconnected": [
+    "\\[FLog::Network\\] (Lost connection|Connection lost)",
+    "\\[DFLog::RbxTransportDummyClient\\] Disconnected from server for reason"
+  ]
+}

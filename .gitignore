@@ -1,0 +1,67 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.key.pub.private
+*.pem
+*.p12
+*.pfx
+.tauri/
+**/tauri-signing*.key
+*signing*.key
+secrets/
+
+# Vault and real-cookie data
+*.rmiv
+*.rmiv.tmp
+vault*.json
+backups/
+data/
+AccountData.json
+RAMSettings.ini
+RecentGames.json
+FavoriteGames.json
+**/fixtures/real/
+*.cookies
+*cookie*.txt
+
+# Logs
+logs/
+*.log
+
+# Build output
+node_modules/
+dist/
+target/
+target-*/
+src-tauri/gen/schemas/
+coverage/
+.vite/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local screenshots scratch
+.screenshots-tmp/
+
+# Impeccable local caches
+.impeccable/hook.cache.json
+.impeccable/review/
+.impeccable/mocks/
+
+# Superpowers SDD scratch
+.superpowers/
+
+# E2E drivers (msedgedriver downloads)
+e2e/.drivers/
+tsconfig.tsbuildinfo
+tsconfig.node.tsbuildinfo
+
+# macOS metadata
+._*

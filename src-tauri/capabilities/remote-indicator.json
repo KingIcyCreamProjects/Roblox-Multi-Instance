@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-indicator",
+  "description": "The always-on-top \"being controlled\" bar: reads the session and stops it, nothing else.",
+  "windows": ["remote-indicator"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "allow-remote-status",
+    "allow-remote-stop"
+  ]
+}

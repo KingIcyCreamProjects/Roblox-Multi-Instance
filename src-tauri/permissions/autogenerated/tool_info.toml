@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tool-info"
+description = "Enables the tool_info command without any pre-configured scope."
+commands.allow = ["tool_info"]
+
+[[permission]]
+identifier = "deny-tool-info"
+description = "Denies the tool_info command without any pre-configured scope."
+commands.deny = ["tool_info"]

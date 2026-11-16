@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ax-trusted"
+description = "Enables the ax_trusted command without any pre-configured scope."
+commands.allow = ["ax_trusted"]
+
+[[permission]]
+identifier = "deny-ax-trusted"
+description = "Denies the ax_trusted command without any pre-configured scope."
+commands.deny = ["ax_trusted"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-outfits-list"
+description = "Enables the outfits_list command without any pre-configured scope."
+commands.allow = ["outfits_list"]
+
+[[permission]]
+identifier = "deny-outfits-list"
+description = "Denies the outfits_list command without any pre-configured scope."
+commands.deny = ["outfits_list"]

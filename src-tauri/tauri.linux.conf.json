@@ -1,0 +1,19 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Roblox Multi Instance",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 620,
+        "decorations": false,
+        "backgroundColor": "#0E1013",
+        "center": true,
+        "visible": false,
+        "dragDropEnabled": false
+      }
+    ]
+  }
+}

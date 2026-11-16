@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Roblox Multi Instance",
+  "mainBinaryName": "roblox-multi-instance",
+  "version": "1.0.0",
+  "identifier": "com.kingicycreamprojects.robloxmultiinstance",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Roblox Multi Instance",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 620,
+        "decorations": true,
+        "backgroundColor": "#0E1013",
+        "center": true,
+        "visible": false,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://*.rbxcdn.com data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost ws:",
+      "assetProtocol": { "enable": true, "scope": [] }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "KingIcyCreamProjects",
+    "copyright": "Copyright (c) 2026 KingIcyCreamProjects",
+    "category": "Utility",
+    "shortDescription": "Personal multi-account manager for Roblox",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwMUM4NjhCMTZERTZEOUUKUldTZWJkNFdpNFljTUdrUHFpOEE4dW56ODRDWEovdVBZQkRESkJBbGZXNnQzZ29GZ3hodEQ3RkkK",
+      "endpoints": [
+        "https://github.com/KingIcyCreamProjects/Roblox-Multi-Instance/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

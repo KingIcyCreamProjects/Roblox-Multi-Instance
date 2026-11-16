@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-signin-kill-stray"
+description = "Enables the signin_kill_stray command without any pre-configured scope."
+commands.allow = ["signin_kill_stray"]
+
+[[permission]]
+identifier = "deny-signin-kill-stray"
+description = "Denies the signin_kill_stray command without any pre-configured scope."
+commands.deny = ["signin_kill_stray"]

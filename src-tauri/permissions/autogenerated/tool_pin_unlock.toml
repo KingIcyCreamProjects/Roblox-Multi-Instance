@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tool-pin-unlock"
+description = "Enables the tool_pin_unlock command without any pre-configured scope."
+commands.allow = ["tool_pin_unlock"]
+
+[[permission]]
+identifier = "deny-tool-pin-unlock"
+description = "Denies the tool_pin_unlock command without any pre-configured scope."
+commands.deny = ["tool_pin_unlock"]

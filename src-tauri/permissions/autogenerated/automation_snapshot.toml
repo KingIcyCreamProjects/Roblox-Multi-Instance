@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-automation-snapshot"
+description = "Enables the automation_snapshot command without any pre-configured scope."
+commands.allow = ["automation_snapshot"]
+
+[[permission]]
+identifier = "deny-automation-snapshot"
+description = "Denies the automation_snapshot command without any pre-configured scope."
+commands.deny = ["automation_snapshot"]

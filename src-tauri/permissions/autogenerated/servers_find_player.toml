@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-servers-find-player"
+description = "Enables the servers_find_player command without any pre-configured scope."
+commands.allow = ["servers_find_player"]
+
+[[permission]]
+identifier = "deny-servers-find-player"
+description = "Denies the servers_find_player command without any pre-configured scope."
+commands.deny = ["servers_find_player"]

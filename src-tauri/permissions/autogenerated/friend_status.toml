@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friend-status"
+description = "Enables the friend_status command without any pre-configured scope."
+commands.allow = ["friend_status"]
+
+[[permission]]
+identifier = "deny-friend-status"
+description = "Denies the friend_status command without any pre-configured scope."
+commands.deny = ["friend_status"]

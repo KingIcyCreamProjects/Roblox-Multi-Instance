@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-servers-reserve-join"
+description = "Enables the servers_reserve_join command without any pre-configured scope."
+commands.allow = ["servers_reserve_join"]
+
+[[permission]]
+identifier = "deny-servers-reserve-join"
+description = "Denies the servers_reserve_join command without any pre-configured scope."
+commands.deny = ["servers_reserve_join"]

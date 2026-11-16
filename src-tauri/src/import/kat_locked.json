@@ -1,0 +1,9 @@
+{
+  "password": "kat-old-password",
+  "opslimit": 3,
+  "memlimit": 268435456,
+  "alg": 2,
+  "key_hex": "f7c6135fb7f82faed39859efe0ab0ab1c87610133ea59484e144c1108c23dcf9",
+  "file_b64": "Um9ibG94IEFjY291bnQgTWFuYWdlciBjcmVhdGVkIGJ5IGljM3cwbGYyMiBAIGdpdGh1Yi5jb20gLi4uLi4uLgABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJif1pVjs4D+yvZTHES1RTnnDRyLSHFS394EN35zx6L/f/W2Bes0lDyXB34I+3yW4C/WA3x0R6qU06rBDWyOVWusCudq6bBWtuKvd7nVgDXSXvd0qC0DOqWNoCwvxblPfdi6Ty5ilkXWDGGV12R3DkT9Hxegbv0TKnUCpmMKN5E5GUYcGvq/XmEIWALL5Vvku9bQtQvhDyPTCt3RxPd6b4t1bqjKUQYQRe5kTqKLCJp/VqacIO0ypIYK9sIwP6F2nI6258MdP/Q6IubBFaRRrhtox3JPD36JpUeOZdHD4l9ZmyBc=",
+  "plaintext": "[{\"Username\":\"KatUser\",\"UserID\":12345,\"SecurityToken\":\"_|WARNING:-test-kat-cookie\",\"Group\":\"Default\",\"Alias\":\"kat\",\"Description\":\"note\",\"Fields\":{\"SavedPlaceId\":\"606849621\"},\"BrowserTrackerID\":\"987654321012\"}]"
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-homelab-latest"
+description = "Enables the homelab_latest command without any pre-configured scope."
+commands.allow = ["homelab_latest"]
+
+[[permission]]
+identifier = "deny-homelab-latest"
+description = "Denies the homelab_latest command without any pre-configured scope."
+commands.deny = ["homelab_latest"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-defender-exclude-cmd"
+description = "Enables the defender_exclude_cmd command without any pre-configured scope."
+commands.allow = ["defender_exclude_cmd"]
+
+[[permission]]
+identifier = "deny-defender-exclude-cmd"
+description = "Denies the defender_exclude_cmd command without any pre-configured scope."
+commands.deny = ["defender_exclude_cmd"]

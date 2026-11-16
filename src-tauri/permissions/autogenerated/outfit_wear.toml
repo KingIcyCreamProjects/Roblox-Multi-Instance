@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-outfit-wear"
+description = "Enables the outfit_wear command without any pre-configured scope."
+commands.allow = ["outfit_wear"]
+
+[[permission]]
+identifier = "deny-outfit-wear"
+description = "Denies the outfit_wear command without any pre-configured scope."
+commands.deny = ["outfit_wear"]

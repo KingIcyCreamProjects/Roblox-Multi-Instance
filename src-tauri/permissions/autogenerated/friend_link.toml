@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-friend-link"
+description = "Enables the friend_link command without any pre-configured scope."
+commands.allow = ["friend_link"]
+
+[[permission]]
+identifier = "deny-friend-link"
+description = "Denies the friend_link command without any pre-configured scope."
+commands.deny = ["friend_link"]
