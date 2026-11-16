@@ -50,7 +50,7 @@ Download the `.dmg` (universal, Apple silicon and Intel). The app is not notariz
 
 ### Linux
 
-Download the `.AppImage` or `.deb`. Launching goes through [Sober](https://sober.vinegarhq.org/) (the Flatpak `org.vinegarhq.Sober`), so you need it installed. Running several accounts at once also needs `pasta` (package `passt`); RMI then gives each client its own Sober profile. Linux is the least tested platform.
+Download the `.AppImage` or `.deb`. They are built on Debian 13, so they need a recent distro: Debian 13, Ubuntu 25.04 or newer, or a current Fedora or Arch. Launching goes through [Sober](https://sober.vinegarhq.org/) (the Flatpak `org.vinegarhq.Sober`), so you need it installed. Running several accounts at once also needs `pasta` (package `passt`); RMI then gives each client its own Sober profile. Linux is the least tested platform.
 
 ## First run
 
@@ -83,7 +83,7 @@ The Devices tab lists your other computers on your own Tailscale network. Pair o
 
 ## Updates
 
-RMI checks GitHub for new versions and asks before installing. Updates are signed, and RMI refuses one that doesn't verify against the public key built into the app. To turn the check off, clear "Check for updates automatically" in Settings. Your vault and settings stay across updates.
+RMI checks GitHub for new versions and asks before installing. Updates are signed, and RMI refuses one that doesn't verify against the public key built into the app. To turn the check off, clear "Check for updates automatically" in Settings. Your vault and settings stay across updates. In 1.0.0 only the Windows installer can update itself; on macOS and Linux, download the new installer from Releases.
 
 ## Using it
 
