@@ -5,6 +5,9 @@
 //! then only on a size change, a viewer request or after an encoder error. No encoder (or
 //! one that fails to start): the stream stays JPEG.
 
+// No encoder off Windows and macOS (no `imp`), so the shared helpers below are unused there.
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+
 use axum::body::Bytes;
 use image::RgbaImage;
 
