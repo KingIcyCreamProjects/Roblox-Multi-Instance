@@ -4,13 +4,21 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      skip_checks:
+        description: "Build without running the checks first (only when they already passed for this commit)"
+        type: boolean
+        default: false
 
 jobs:
   check:
+    if: ${{ !inputs.skip_checks }}
     uses: ./.github/workflows/ci.yml
 
   release:
     needs: check
+    # after the checks pass, or when they were skipped on purpose from the Actions tab
+    if: ${{ !cancelled() && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
     permissions:
       contents: write
     strategy:
