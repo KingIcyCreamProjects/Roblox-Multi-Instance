@@ -1,5 +1,6 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
+import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import {
@@ -28,8 +29,14 @@ import { useSettings } from "@/app/useSettings";
 import { toast } from "@/components/Toasts";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
-import { placeIdOf, usePlayBar } from "@/features/playbar/store";
-import { launchBusy, usePlay } from "@/features/playbar/usePlay";
+import { placeIdOf, saveLaunchSet, usePlayBar } from "@/features/playbar/store";
+import {
+  clearPlaceholder,
+  launchBlocked,
+  launchBusy,
+  useLaunch,
+  usePlay,
+} from "@/features/playbar/usePlay";
 import { call, errMessage, type ServerKind, type ServerRow } from "@/lib/ipc";
 import { fmtInt, t, type MsgKey } from "@/lib/i18n";
 import { reportError } from "@/lib/report";
@@ -85,6 +92,7 @@ export function Servers() {
   const selIds = useUi((u) => u.sel.ids);
   const account = selIds[0] ?? null;
   const { play } = usePlay();
+  const qc = useQueryClient();
   const list = useServerStream();
   const find = useFindPlayer();
   const [kind, setKind] = useState<ServerKind>("public");
@@ -94,7 +102,8 @@ export function Servers() {
   const [sort, setSort] = useState<Sort>(null);
   const [regions, setRegions] = useState<Regions>({});
   const [regionsBusy, setRegionsBusy] = useState(false);
-  const regionsLoading = useRef(false);
+  /** Epoch of the region load in flight, if any. */
+  const regionsLoading = useRef<number | null>(null);
   const [username, setUsername] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -137,6 +146,8 @@ export function Servers() {
   const clearRegions = () => {
     regionsEpoch.current += 1;
     setRegions({});
+    // An older load may still run (Rust cancels it when the next one starts): don't wait for it.
+    setRegionsBusy(false);
   };
   const refresh = (k: ServerKind = kind, p: number | null = placeId) => {
     if (p === null || (k === "private" && !account)) return;
@@ -199,26 +210,45 @@ export function Servers() {
    * Its batch shows on the Play button once its events arrive. */
   const reserveJoin = (r: ServerRow) => {
     if (rowsPlace === null || !selIds.length) return;
+    const why = launchBlocked(qc);
+    if (why) return void toast(why);
     if (launchBusy()) return void toast(t("launch.busy"));
+    saveLaunchSet(selIds); // Home's hero Play reads it
+    // Busy while the reservations run (Rust returns only after one gamejoin per account), so
+    // Play and Join can't start a second batch. The real batch shows once its events arrive.
+    useLaunch.setState({
+      batch: { id: null, ids: selIds, done: null, reserve: true },
+      focus: false,
+    });
     call("servers_reserve_join", { placeId: rowsPlace, jobId: r.jobId, accountIds: selIds }).then(
-      () => toast(t("servers.reserveStarted")),
-      (e) => toast(errMessage(e)),
+      () => {
+        clearPlaceholder(selIds);
+        toast(t("servers.reserveStarted"));
+      },
+      (e) => {
+        clearPlaceholder(selIds);
+        toast(errMessage(e));
+      },
     );
   };
   /** Every region load (button, context menu) goes through here: one at a time. */
   const loadRegions = async (jobIds: string[]) => {
-    if (!account || rowsPlace === null || !jobIds.length || regionsLoading.current) return;
-    regionsLoading.current = true;
-    setRegionsBusy(true);
     const epoch = regionsEpoch.current;
+    // one at a time per list: a load from before a refresh doesn't count
+    if (!account || rowsPlace === null || !jobIds.length || regionsLoading.current === epoch)
+      return;
+    regionsLoading.current = epoch;
+    setRegionsBusy(true);
     try {
       const got = await call("servers_regions", { placeId: rowsPlace, jobIds, accountId: account });
       if (epoch === regionsEpoch.current) setRegions((r) => ({ ...r, ...got }));
     } catch (e) {
       reportError(e);
     } finally {
-      regionsLoading.current = false;
-      setRegionsBusy(false);
+      if (regionsLoading.current === epoch) {
+        regionsLoading.current = null;
+        setRegionsBusy(false);
+      }
     }
   };
   // A region filter hides rows whose region isn't loaded: then look up the next unloaded
@@ -337,7 +367,7 @@ export function Servers() {
           <PanelTitle
             title={
               region
-                ? region.label.split(",")[0]
+                ? region.label
                 : row.kind === "private"
                   ? (row.name ?? t("servers.private"))
                   : row.jobId.slice(0, 8)
@@ -823,10 +853,8 @@ function Row({
                 {region.countryCode}
               </span>
             )}
-            {/* the chip carries the country; the label shows the city only */}
-            <span className="truncate text-text-2">
-              {region.countryCode ? region.label.split(",")[0] : region.label}
-            </span>
+            {/* the format is free text: show all of it, the chip only adds the country code */}
+            <span className="truncate text-text-2">{region.label}</span>
           </>
         )}
       </div>

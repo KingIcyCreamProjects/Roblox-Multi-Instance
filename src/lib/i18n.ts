@@ -70,7 +70,7 @@ const en = {
   "tour.add.signIn": "Sign in with Roblox",
   "tour.add.signInD": "Opens the Roblox login. One account at a time.",
   "tour.add.import": "Import",
-  "tour.add.importD": "From Roblox Account Manager or a file.",
+  "tour.add.importD": "From the data folder of Roblox Account Manager.",
   "tour.add.note": "You can add more anytime from Accounts.",
   "tour.pick.title": "Pick what you want",
   "tour.pick.sub": "Set it up your way. Nothing here is locked in.",
@@ -87,7 +87,8 @@ const en = {
   "tour.pick.trayD":
     "Closing the window leaves RMI running, with its icon in the tray or menu bar.",
   "tour.tabs.title": "Arrange your tabs",
-  "tour.tabs.sub": "Put the pages you use most first. RMI opens on the first one.",
+  "tour.tabs.sub":
+    "Put the pages you use most first. RMI opens on the first one, skipping Automation while it is off.",
   "tour.friend.title": "Let a friend restart their accounts",
   "tour.friend.sub":
     "Optional. One link lets a friend disconnect and reconnect the accounts you pick, for example when a client freezes while you are away.",
@@ -123,7 +124,8 @@ const en = {
   "tabs.order": "Tab order",
   "tabs.up": "Move {name} up",
   "tabs.down": "Move {name} down",
-  "tabs.desc": "The order of the tabs at the top. RMI opens on the first one.",
+  "tabs.desc":
+    "The order of the tabs at the top. RMI opens on the first one, skipping Automation while it is off.",
   "tour.perf.title": "Graphics and FPS",
   "tour.perf.sub": "Every Roblox starts light so many can run at once. Change it anytime.",
   "tour.perf.fps": "Frame rate",
@@ -147,7 +149,7 @@ const en = {
   "tour.mac.axTodo":
     "Turn on Roblox Multi Instance in System Settings > Privacy & Security > Accessibility, then press Check again.",
   "tour.mac.update":
-    "After an update macOS may switch this off again. If Grid Arrange stops working, turn RMI off and back on in the same place.",
+    "After each update macOS forgets this, even though RMI still shows as on. If Grid Arrange stops working, remove RMI from the list with the minus button and add it again.",
   "tour.def.title": "A heads-up about Windows Security",
   "tour.def.sub": "Defender may flag RMI. Here is why, and a quick fix.",
   "tour.def.why":
@@ -313,7 +315,7 @@ const en = {
   "play.multiBlocked":
     "Multi-instance is blocked: a running Roblox client holds its lock. Close all Roblox windows once, then multi-client will work.",
   "play.multiPending": "Multi-instance stays on until your Roblox windows close.",
-  "play.multiInProcess": "Closing RMI will close your Roblox windows.",
+  "play.multiInProcess": "Closing RMI will close all but one of your Roblox windows.",
   "launch.progress": "Launching {n} of {total}",
   "launch.cancel": "Cancel",
   "launch.allOk": "Launched {n}",
@@ -510,7 +512,7 @@ const en = {
   "reauth.confirm": "Confirm",
   "reauth.checking": "Checking…",
   "reauth.os": "Confirm with Windows Hello",
-  "reauth.osOther": "Confirm with your system sign-in",
+  "reauth.osOther": "Confirm with a click",
   "dest.set": "Destination set to {name}",
   "discover.servers": "Servers",
   "discover.games": "Games",
@@ -778,8 +780,6 @@ const en = {
   "set.client.customSettingsPath": "Client settings file",
   "set.client.customSettingsPath.d":
     "Optional Roblox settings file to use. Empty uses the default.",
-  "set.client.bootstrapperPassthrough": "Use other Roblox launcher",
-  "set.client.bootstrapperPassthrough.d": "Let another launcher open games when it is installed.",
   "set.antiAfk.enabled": "Anti-AFK",
   "set.antiAfk.enabled.d":
     "Clicks the chat button in every Roblox twice (open, then close) so the 20 minute idle kick never hits. Only runs while you are away from the keyboard and mouse. Each window gets the focus for half a second, and the mouse goes back where it was.",
@@ -805,7 +805,8 @@ const en = {
   "set.vault.autoLockMin.d":
     "Minutes idle before the vault locks. 0 never locks. Waits while auto-reconnect or friend remote is on and Roblox windows are open.",
   "set.vault.lockOnSleep": "Lock on sleep",
-  "set.vault.lockOnSleep.d": "Lock the vault when your computer sleeps or locks.",
+  "set.vault.lockOnSleep.d":
+    "Lock the vault when your computer sleeps. On Windows it also locks when you lock the PC.",
   "set.geo.enabled": "Server region lookup",
   "set.geo.enabled.d": "Show server regions. Sends server addresses to the URL below.",
   "set.geo.urlTemplate": "Lookup URL",
@@ -843,6 +844,9 @@ const en = {
     "The web address your friend opens, for example your Tailscale Funnel address.",
   "set.friend.username": "Friend username",
   "set.friend.username.d": "The name your friend logs in with. Not case sensitive.",
+  "set.friend.ownerUsername": "Your own login",
+  "set.friend.ownerUsername.d":
+    "A username for a second login that sees every account and which computer each runs on. Give it only to yourself. Leave empty to turn it off.",
   "set.friend.canAdd": "Let your friend add accounts",
   "set.friend.canAdd.d":
     "Your friend signs in to their own Roblox account from the friend page. It is added here and shared with them. Nothing leaves this computer.",
@@ -852,22 +856,35 @@ const en = {
     "Share a login page so a friend can disconnect or reconnect chosen accounts.",
   "sec.friend": "Friend remote",
   "fs.intro":
-    "Tailscale is a free app that gives your PC a web address. Anyone can open that address, but only the login page loads without the password. The address contains your Tailscale device name. Your friend does not need Tailscale.",
+    "You need a free Tailscale account. It takes about 2 minutes. Your friend installs nothing: they only open a link in a browser. Tailscale gives your PC a web address, and only the login page loads without the password.",
   "fs.done": "Done",
+  "fs.tag.done": "Done",
+  "fs.tag.current": "Needs you",
+  "fs.tag.upcoming": "Waiting",
   "fs.step1": "Install Tailscale",
-  "fs.step1.d": "A small free app from tailscale.com.",
-  "fs.download": "Open download page",
+  "fs.step1.d": "Download Tailscale, run the installer and finish it.",
+  "fs.step1.stuck": "Installed it? This page notices by itself within a few seconds.",
+  "fs.download": "Download Tailscale",
   "fs.step2": "Sign in to Tailscale",
   "fs.step2.win":
-    "Open Tailscale from the system tray, near the clock, and sign in. A free account works.",
-  "fs.step2.mac": "Open Tailscale from the menu bar and sign in. A free account works.",
+    "Click the Tailscale icon in the system tray near the clock (it may hide behind the ^ arrow), choose Log in, and sign in. A free account works.",
+  "fs.step2.mac":
+    "Click the Tailscale icon in the menu bar, choose Log in, and sign in. A free account works.",
+  "fs.step2.linux":
+    "Run `sudo tailscale up` in a terminal and open the link it prints. A free account works.",
+  "fs.step2.stuck":
+    "Still here? Open Tailscale and check that it says Connected. This page updates by itself.",
   "fs.step3": "Turn on your friend link",
-  "fs.step3.d": "RMI sets it up for you. Only the friend login page is shared.",
+  "fs.step3.d":
+    "Click the button. RMI shares only the login page, and your friend still needs the password. Next you pick the accounts and send the link.",
+  "fs.step3.wait": "Finish the steps above first.",
   "fs.enable": "Turn on friend link",
   "fs.enabling": "Turning on…",
+  "fs.fail.hint":
+    "Click Turn on friend link to try again. If it keeps failing, use your own address below.",
   "fs.admin": "Allow Funnel for your Tailscale account",
   "fs.admin.d":
-    "Tailscale needs your OK once before it can share a link. Open the page, allow it, then come back and try again.",
+    "Tailscale needs your OK once before it can share a link. Click Open Tailscale page, approve it there, then come back and click Try again.",
   "fs.admin.open": "Open Tailscale page",
   "fs.retry": "Try again",
   "fs.own": "I have my own address",
@@ -980,6 +997,24 @@ const en = {
   "friend.tsOff": "Turn off friend link",
   "friend.tsOff.d": "Removes the Tailscale link RMI made and turns the friend remote off.",
   "friend.off": "Friend link is off.",
+  "friend.send": "What to send your friend",
+  "friend.send.d": "Send the link and username first. Send the password in a separate message.",
+  "friend.link": "Link",
+  "friend.user": "Username",
+  "friend.pass": "Password",
+  "friend.copyBtn": "Copy",
+  "friend.copyUser": "Copy username",
+  "friend.userCopied": "Username copied.",
+  "friend.invite": "Copy invite",
+  "friend.inviteD": "A ready message with the link and username. It never holds the password.",
+  "friend.inviteCopied": "Invite copied. Send the password in a separate message.",
+  "friend.inviteText":
+    "Hi! Open this link to disconnect or reconnect the Roblox accounts I picked for you:\n{link}\nUsername: {user}\nI will send the password in a separate message.",
+  "friend.open": "Open the page",
+  "friend.ownerPassword": "Your own login password",
+  "friend.copyOwnerPw": "Copy your own password",
+  "friend.ownerPwCopied": "Your own password copied.",
+  "friend.ownerSame": "Pick a name that is different from the friend username.",
   "friend.copy": "Copy friend link",
   "friend.copied": "Friend link copied.",
   "friend.password": "Friend password",
@@ -1013,13 +1048,15 @@ const en = {
   "set.relaunch.usePresence": "Use online status",
   "set.relaunch.usePresence.d": "Use online status to decide when to relaunch.",
   "set.clients.minimizeEverySec": "Minimize clients",
-  "set.clients.minimizeEverySec.d": "Minimize clients on a timer, in seconds. 0 is off.",
+  "set.clients.minimizeEverySec.d":
+    "Minimize clients on a timer, in seconds. 0 is off. Needs Automation.",
   "set.clients.closeAfterMin": "Close after",
-  "set.clients.closeAfterMin.d": "Close clients after this many minutes. 0 is off.",
+  "set.clients.closeAfterMin.d":
+    "Close clients after this many minutes. 0 is off. Needs Automation.",
   "set.clients.closeScope": "Close timer applies to",
-  "set.clients.closeScope.d": "Time each client alone or all clients together.",
+  "set.clients.closeScope.d": "Time each client alone or all clients together. Needs Automation.",
   "set.clients.maxInstances": "Max instances",
-  "set.clients.maxInstances.d": "Most clients allowed at once. 0 means no limit.",
+  "set.clients.maxInstances.d": "Most clients allowed at once. 0 means no limit. Needs Automation.",
   "set.watcher.enabled": "Client watcher",
   "set.watcher.enabled.d": "Watch running clients and close broken ones.",
   "set.watcher.scanSec": "Scan interval",
@@ -1138,7 +1175,7 @@ const en = {
   "settings.lanWarn":
     "Anyone on your network with the token can control RMI. Leave off unless needed.",
   "settings.token": "API token",
-  "settings.tokenNote": "The token changes each time RMI starts.",
+  "settings.tokenNote": "The token stays the same until you regenerate it.",
   "settings.about.version": "Version {v}",
   "settings.about.data": "Data folder",
   "settings.about.openData": "Open data folder",
@@ -1164,7 +1201,7 @@ const en = {
   "vs.toPwBtn": "Use a master password",
   "vs.toPwDone": "Vault now needs a master password.",
   "vs.backups": "Backups",
-  "vs.backups.d": "Saved automatically before each change.",
+  "vs.backups.d": "Saved automatically, at most every 5 minutes.",
   "vs.backups.none": "No backups yet.",
   "vs.backups.err": "Could not list backups.",
   "vs.backups.loading": "Loading backups…",
@@ -1262,7 +1299,7 @@ export const LOCALE = "en";
 export const fmtInt = (n: number) => n.toLocaleString(LOCALE);
 
 export function t(key: MsgKey, vars?: Record<string, string | number>): string {
-  let s: string = en[key];
-  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v));
-  return s;
+  const s: string = en[key];
+  // one pass with a function: a value is never re-scanned or read as a `$&` replacement pattern
+  return vars ? s.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : s;
 }

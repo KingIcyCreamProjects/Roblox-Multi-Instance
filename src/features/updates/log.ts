@@ -16,6 +16,44 @@ export type Update = {
 
 export const UPDATES: Update[] = [
   {
+    version: "1.0.1",
+    date: "2026-11-16",
+    title: "Fixes, and an easier friend remote",
+    summary:
+      "A full pass over the whole app found and fixed more than 90 problems. Friend remote is easier to set up, and its phone page shows more.",
+    added: [
+      {
+        text: "Friend remote setup walks you through each step with links, then shows exactly what to send, with a Copy invite button.",
+        to: "friend.enabled",
+      },
+      {
+        text: "Your own login for the phone page: it sees every account and which computer each one runs on.",
+        to: "friend.ownerUsername",
+      },
+      "The phone page fits about twice as many accounts on a screen, has a summary line, and says when an account is starting or runs on another computer.",
+      "Computers you paired tell each other which accounts they run, so the phone page can name the computer.",
+    ],
+    improved: [
+      "Settings that do nothing on your system are hidden or dimmed instead of looking like they work.",
+      "Discover: Reserve and join blocks a second Play while it works, loading regions can be restarted, and missing thumbnails are retried.",
+      "Play bar: server links, links with a language in them and ro.blox.com links now save and launch correctly.",
+      "A saved cookie that belongs to another Roblox user is flagged instead of trusted.",
+      "macOS: after an update, RMI explains how to give Accessibility access back.",
+    ],
+    fixed: [
+      "Windows: all Roblox clients but one could close when the computer was under heavy load.",
+      "Auto-reconnect: a disconnect skipped by the hourly limit is retried later, a crash after a rejoin is relaunched, and it works on Linux without passt.",
+      "Changing the vault password asks for the system check first, like exporting does.",
+      "A new vault no longer removes the backups of an older one, and recovery works for a damaged vault that opens without a password.",
+      "Friend remote: the link survives a port change, and Tailscale Funnel is switched off when RMI can not use its port.",
+      "Remote access: a finished file transfer no longer blocks the next one, and long file names in any language upload.",
+      "Saved window positions are kept for minimized windows and ignored for a monitor that is gone.",
+      "Anti-AFK works with a maximized window in front and stops when you come back.",
+      "After installing an update, RMI opens its window instead of hiding in the tray.",
+      "Many smaller fixes in Accounts, Grid Arrange, import, the tray menu and the texts.",
+    ],
+  },
+  {
     version: "1.0.0",
     date: "2026-11-16",
     title: "Public release",
@@ -36,7 +74,7 @@ export const UPDATES: Update[] = [
       },
       {
         text: "Automation: a local API for your own scripts. Off until you enable it.",
-        to: "automation",
+        to: "automation.enabled",
       },
       {
         text: "Devices: see and control your other computers over Tailscale. Off until you switch it on.",

@@ -632,6 +632,9 @@ pub fn start_batch<H: Host>(
         return Err("Pick at least one account.".into());
     }
     let st = h.st();
+    // Taken before the unlocked check: a lock landing before the batch is in `BATCHES`
+    // (its cancel_all misses it) is caught right after the insert below.
+    let gen = Gen::now(&st.lock_gen);
     if guard(&st.vault).is_none() {
         return Err(LOCKED.into());
     }
@@ -652,7 +655,7 @@ pub fn start_batch<H: Host>(
     st.automation.own_begin(&account_ids);
     if paused {
         let ids = account_ids.clone();
-        let r = mutate(st, Gen::now(&st.lock_gen), move |p| {
+        let r = mutate(st, gen, move |p| {
             for a in p.accounts.iter_mut().filter(|a| ids.contains(&a.id)) {
                 a.friend_paused = false;
             }
@@ -669,6 +672,9 @@ pub fn start_batch<H: Host>(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(batch_id.clone(), token.clone());
+    if !gen.current(&st.lock_gen) {
+        token.cancel(); // locked meanwhile: run_batch reports every account cancelled
+    }
     // Known to `batch_status` / `launch_status` before the task runs (it may wait its turn).
     for id in &account_ids {
         record(
@@ -1300,8 +1306,15 @@ mod tests {
             .contains(&"accounts://changed".to_string()));
     }
 
+    /// `cancel_all` cancels every live batch in the process: tests asserting a real batch's
+    /// outcome hold this so it never runs mid-batch.
+    /// Tests that start a launching batch also pass `launch.delayMs` 0: the process-global TURN
+    /// would otherwise make the next batch wait the real 2.5 s stagger.
+    static LIVE_BATCHES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn cancel_all_cancels_live_batches() {
+        let _g = LIVE_BATCHES.blocking_lock();
         let t = CancellationToken::new();
         BATCHES.lock().unwrap().insert("CA1".into(), t.clone());
         cancel_all();
@@ -1327,8 +1340,16 @@ mod tests {
 
     #[tokio::test]
     async fn start_batch_dedupes_account_ids() {
+        let _g = LIVE_BATCHES.lock().await;
         let d = tempfile::tempdir().unwrap();
-        let h = host(d.path(), "D1", "good", serde_json::json!({}), false).await;
+        let h = host(
+            d.path(),
+            "D1",
+            "good",
+            serde_json::json!({"launch": {"delayMs": 0}}),
+            false,
+        )
+        .await;
         let id = start_batch(&h, vec!["D1".into(), "D1".into()], bar("5"), false, true).unwrap();
         let mut v = Value::Null;
         for _ in 0..500 {
@@ -1344,7 +1365,14 @@ mod tests {
     #[tokio::test]
     async fn start_batch_clears_friend_pause() {
         let d = tempfile::tempdir().unwrap();
-        let h = host(d.path(), "FP1", "good", serde_json::json!({}), false).await;
+        let h = host(
+            d.path(),
+            "FP1",
+            "good",
+            serde_json::json!({"launch": {"delayMs": 0}}),
+            false,
+        )
+        .await;
         for a in
             h.0.vault
                 .lock()

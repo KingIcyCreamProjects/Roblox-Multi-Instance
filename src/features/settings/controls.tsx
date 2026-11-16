@@ -196,6 +196,7 @@ function TextCtl({
       value={txt}
       placeholder={item.placeholder}
       spellCheck={false}
+      maxLength={item.max}
       onChange={(e) => {
         setTxt(e.target.value);
         if (!item.onBlur) commit(e.target.value);

@@ -23,6 +23,10 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # One OS at a time: each tauri-action run downloads latest.json, adds its platforms,
+      # deletes the asset and uploads its copy, so parallel runs can drop a platform (and can
+      # race to create duplicate draft releases).
+      max-parallel: 1
       matrix:
         include:
           - os: windows-latest
@@ -41,6 +45,11 @@ jobs:
         run: |
           conf=$(node -p 'require("./src-tauri/tauri.conf.json").version')
           [ "${GITHUB_REF_NAME#v}" = "$conf" ] || { echo "tag $GITHUB_REF_NAME != tauri.conf.json $conf"; exit 1; }
+          # the About page and What's new log read the Cargo.toml version
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          pkg=$(node -p 'require("./package.json").version')
+          [ "$cargo" = "$conf" ] || { echo "Cargo.toml $cargo != tauri.conf.json $conf"; exit 1; }
+          [ "$pkg" = "$conf" ] || { echo "package.json $pkg != tauri.conf.json $conf"; exit 1; }
 
       - name: Linux system deps
         if: runner.os == 'Linux'
@@ -48,7 +57,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev xdg-utils
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1 # pinned: a new Rust release must not break clippy -D warnings on a tag
         with:
           targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2

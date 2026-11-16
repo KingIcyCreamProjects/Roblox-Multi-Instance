@@ -304,7 +304,8 @@ pub async fn settings_set(
     let next = persist(&state, &patch)?;
     // Remote off, moved or address cleared: drop RMI's Funnel entry for the old port first, so
     // it can't expose whatever listens there later. A failure only logs; the save stands.
-    if let Some(port) = prev.and_then(|p| crate::friend::tailscale::stale_port(&p, &next)) {
+    let prev = prev.as_ref();
+    if let Some(port) = prev.and_then(|p| crate::friend::tailscale::stale_port(p, &next)) {
         let r = tauri::async_runtime::spawn_blocking(move || {
             crate::friend::tailscale::disable_target(port)
         })
@@ -315,6 +316,7 @@ pub async fn settings_set(
             Err(e) => log::warn!("removing the friend Funnel entry failed: {e}"),
         }
     }
+    let moved = prev.and_then(|p| crate::friend::tailscale::moved_port(p, &next));
     if patch.get("multi").is_some() {
         state_changed(&app, &["roblox"]); // multiActive / cookieLockActive moved
     }
@@ -333,6 +335,39 @@ pub async fn settings_set(
 
     // Friend enabled / port may have changed too.
     let fr = friend_sync(&app).await;
+    // Port moved while on: Funnel on for the new port, only once the friend server holds it
+    // (else another program listening there would be public). Its address may differ
+    // (another Funnel port was free); if the bind or this fails the address is cleared, so
+    // the setup shows again instead of a dead link.
+    if let Some(port) = moved {
+        let s = state.friend.status().await;
+        let url = if fr.is_err() || !s.running || s.port != port {
+            log::warn!("friend Funnel not moved: the friend server is not on port {port}");
+            String::new()
+        } else {
+            let r = tauri::async_runtime::spawn_blocking(move || {
+                crate::friend::tailscale::enable_port(port)
+            })
+            .await;
+            match r {
+                Ok(Ok(u)) => u,
+                Ok(Err(e)) => {
+                    log::warn!("friend Funnel for the new port failed: {}", e.message);
+                    String::new()
+                }
+                Err(e) => {
+                    log::warn!("friend Funnel for the new port failed: {e}");
+                    String::new()
+                }
+            }
+        };
+        if next.pointer("/friend/publicUrl") != Some(&Value::String(url.clone())) {
+            let patch = serde_json::json!({ "friend": { "publicUrl": url } });
+            if let Err(e) = persist(&state, &patch) {
+                log::error!("saving the friend address failed: {e}");
+            }
+        }
+    }
     // Remote access: listen, move or stop (and end a live session when switched off).
     state.remote.sync().await;
     state_changed(&app, &["remoteStatus"]);
@@ -801,9 +836,44 @@ pub(crate) async fn friend_sync(app: &tauri::AppHandle) -> Result<(), String> {
     if st.friend.enabled() {
         friend_token(app).await;
     }
-    let r = st.friend.sync().await;
+    // A short-lived conflict (a port held for a moment after a reboot or an update restart)
+    // must not end the friend link: retry the bind first (the app start runs this in its own
+    // task, so the wait blocks nothing else there).
+    let mut r = st.friend.sync().await;
+    for _ in 1..3 {
+        if r.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        r = st.friend.sync().await;
+    }
+    // Still in use: whatever listens on that port must not stay public through RMI's Funnel,
+    // and the address it had is cleared so the app no longer offers it as a working link.
+    // "Permission denied" counts too: Windows answers that when the other program took the
+    // port for itself alone (and for a reserved port, where dropping the entry costs nothing).
+    // Other bind errors only log: Funnel and the address stay.
+    use std::io::ErrorKind::{AddrInUse, PermissionDenied};
+    if r.as_ref()
+        .is_err_and(|e| matches!(e.kind(), AddrInUse | PermissionDenied))
+    {
+        let s = st.friend.status().await;
+        let patch = tauri::async_runtime::spawn_blocking(move || {
+            crate::friend::tailscale::drop_orphan(&s, crate::friend::tailscale::disable_target)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("removing the friend Funnel entry failed: {e}");
+            None
+        });
+        if let Some(p) = patch {
+            match persist(&st, &p) {
+                Ok(_) => state_changed(app, &["settings"]),
+                Err(e) => log::error!("clearing the friend address failed: {e}"),
+            }
+        }
+    }
     state_changed(app, &["friendStatus"]);
-    r
+    r.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -822,6 +892,13 @@ pub async fn friend_link(state: State<'_, AppState>) -> CmdResult<String> {
 pub async fn friend_password(app: tauri::AppHandle) -> CmdResult<String> {
     friend_token(&app).await;
     app.state::<AppState>().friend.password()
+}
+
+/// Secret: the owner login's password, for the owner to view or copy.
+#[tauri::command]
+pub async fn friend_owner_password(app: tauri::AppHandle) -> CmdResult<String> {
+    friend_token(&app).await;
+    app.state::<AppState>().friend.owner_password()
 }
 
 /// New friend password and token (signs the friend out at once); returns the password.
@@ -891,11 +968,11 @@ pub fn automation_relaunch_set(
     state: State<'_, AppState>,
     account: String,
     enabled: bool,
-    delay_sec: u64,
+    delay_sec: Option<u64>,
     place_id: Option<u64>,
     job_id: Option<String>,
 ) -> CmdResult<()> {
-    if delay_sec > 86_400 {
+    if delay_sec.is_some_and(|d| d > 86_400) {
         return Err("Delay can be at most 86400 seconds.".into());
     }
     let job_id = job_id
@@ -1402,11 +1479,17 @@ fn change_password_impl(c: &Ctx, current: Option<&str>, new: Option<&str>) -> Cm
 
 #[tauri::command]
 pub async fn vault_change_password(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     current: Option<String>,
     new: Option<String>,
 ) -> CmdResult<()> {
     let (current, new) = (current.map(Zeroizing::new), new.map(Zeroizing::new));
+    // OS mode has no current password to check: confirm presence, the same gate as the exports
+    // (switching to a password the caller picks would otherwise unlock them without it).
+    // Without Windows Hello on the device: the plain OK / Cancel dialog, since giving the
+    // vault a password is that user's way out and must stay possible.
+    crate::accounts::cmds::os_presence(&app, &state, true).await?;
     change_password_impl(
         &Ctx::of(&state),
         current.as_deref().map(|s| s.as_str()),
@@ -1476,7 +1559,21 @@ fn restore_impl(
     // must never let someone swap out a healthy vault.
     let cur_mode = std::fs::read(&c.vault)
         .ok()
-        .and_then(|b| vault::format::decode(&b).ok().map(|(h, _, _)| h.mode));
+        .and_then(|b| vault::format::decode(&b).ok().map(|(h, _, _)| h.mode))
+        // Unreadable header (0-byte placeholder or mangled): the newest backup tells which
+        // mode this vault was in, so an OS-mode vault can still be recovered here.
+        .or_else(|| {
+            let (_, newest) = std::fs::read_dir(&c.backups)
+                .ok()?
+                .flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().into_string().ok()?;
+                    Some((store::parse_backup_name(&n)?, n))
+                })
+                .max()?;
+            let b = std::fs::read(c.backups.join(newest)).ok()?;
+            vault::format::decode(&b).ok().map(|(h, _, _)| h.mode)
+        });
     match Vault::open(&c.vault, password, os.clone()) {
         Ok(_) => return Err("The vault opens fine: unlock it, then restore from Settings.".into()),
         Err(VaultError::Corrupt) => {}
@@ -1564,7 +1661,7 @@ pub async fn vault_export_encrypted(
     let current = current.map(Zeroizing::new);
     let c = Ctx::of(&state);
     keys(c.slot)?; // fail fast when locked (before touching the OS store)
-    crate::accounts::cmds::os_presence(&app, &state).await?;
+    crate::accounts::cmds::os_presence(&app, &state, false).await?;
     export_encrypted_impl(
         &c,
         &*state.os().map_err(verr)?,
@@ -1595,7 +1692,7 @@ pub async fn vault_export_plain(
 ) -> CmdResult<()> {
     let password = password.map(Zeroizing::new);
     vault::check_plain_confirm(&confirm)?; // before any OS prompt
-    crate::accounts::cmds::os_presence(&app, &state).await?;
+    crate::accounts::cmds::os_presence(&app, &state, false).await?;
     export_plain_impl(
         &Ctx::of(&state),
         &path,
@@ -2184,7 +2281,12 @@ mod tests {
             .unwrap_err()
             .contains("opens fine"));
         assert_eq!(std::fs::read(t.path()).unwrap(), before);
-        // damaged vault of unknown mode: an OS-mode backup is still refused
+        // damaged vault whose newest backup is password mode: an OS-mode backup is still refused
+        std::fs::copy(
+            t.path(),
+            t.root.join("backups").join("vault-20260101-000004.rmiv"),
+        )
+        .unwrap();
         std::fs::write(t.path(), b"RMIVAULT\0\0\0\0v001junk").unwrap();
         assert!(restore_impl(&t.c(), name, None, || Ok(os()))
             .unwrap_err()
@@ -2208,6 +2310,20 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         std::fs::write(t.path(), &bytes).unwrap();
+        restore_impl(&t.c(), &name, None, || Ok(os())).unwrap();
+        assert!(Vault::open(&t.path(), None, os()).is_ok());
+    }
+
+    #[test]
+    fn locked_restore_os_vault_unreadable_header() {
+        let t = setup(None);
+        unlock(&t, None, false).unwrap();
+        set_marker(&t, "a");
+        set_marker(&t, "b");
+        let name = t.backups().pop().unwrap();
+        t.lock();
+        // 0 bytes with backups: Recovery, and the header gives no mode
+        std::fs::write(t.path(), b"").unwrap();
         restore_impl(&t.c(), &name, None, || Ok(os())).unwrap();
         assert!(Vault::open(&t.path(), None, os()).is_ok());
     }

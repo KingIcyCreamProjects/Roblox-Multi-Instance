@@ -352,7 +352,7 @@ impl RobloxClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.trim().parse::<u64>().ok())
-                    .map_or(0, |s| (s * 1000).min(MAX_RETRY_AFTER_MS));
+                    .map_or(0, |s| s.saturating_mul(1000).min(MAX_RETRY_AFTER_MS));
                 let ms = (500u64 << (tries - 1)).min(30_000).max(retry_after)
                     + rand::random_range(0..250u64);
                 let hook = self.hook.lock().unwrap().clone();
@@ -481,6 +481,21 @@ mod tests {
                 get(|State(m): State<Arc<Mock>>| async move {
                     if m.hits.fetch_add(1, SeqCst) == 0 {
                         (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "3")]).into_response()
+                    } else {
+                        Json(json!({"ok": true})).into_response()
+                    }
+                }),
+            )
+            // u64::MAX seconds: the milliseconds would overflow
+            .route(
+                "/ra-huge",
+                get(|State(m): State<Arc<Mock>>| async move {
+                    if m.hits.fetch_add(1, SeqCst) == 0 {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "18446744073709551615")],
+                        )
+                            .into_response()
                     } else {
                         Json(json!({"ok": true})).into_response()
                     }
@@ -618,6 +633,21 @@ mod tests {
         c.get_json::<Value>("www", "/ra", None).await.unwrap();
         assert!((3000..3250).contains(&seen.lock().unwrap()[0]));
         assert!(t.elapsed() >= Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "the paused clock outruns loopback sockets on macOS and the request times out"
+    )]
+    async fn huge_retry_after_is_capped() {
+        let (c, _m) = serve().await;
+        let seen = Arc::new(Mutex::new(vec![]));
+        let s2 = seen.clone();
+        c.set_ratelimit_hook(Arc::new(move |_, ms| s2.lock().unwrap().push(ms)));
+        c.get_json::<Value>("www", "/ra-huge", None).await.unwrap();
+        let ms = seen.lock().unwrap()[0];
+        assert!((MAX_RETRY_AFTER_MS..MAX_RETRY_AFTER_MS + 250).contains(&ms));
     }
 
     #[tokio::test(start_paused = true)]

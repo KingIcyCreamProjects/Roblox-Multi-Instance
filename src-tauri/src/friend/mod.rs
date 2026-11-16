@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -36,7 +36,7 @@ pub struct FriendAccount {
     pub id: String,
     pub display_name: String,
     pub username: String,
-    /// "inGame" | "online" | "offline" | "paused"
+    /// "inGame" | "online" | "starting" | "offline" | "paused"
     pub status: &'static str,
     pub game: Option<String>,
     pub uptime_sec: Option<u64>,
@@ -44,6 +44,10 @@ pub struct FriendAccount {
     /// another computer. The status stays "offline" (nothing here to disconnect).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub elsewhere: bool,
+    /// The computer the account's client is on, by name (never an address): this one, or a
+    /// paired computer that reported it. Only for the owner's own login.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
 /// Unknown and not-allowed ids get this same answer: the friend cannot probe which exist.
@@ -85,13 +89,24 @@ pub fn roblox(e: crate::roblox::RobloxError) -> ApiError {
     ApiError::new(502, "roblox", msg)
 }
 
-/// The automation backend's 423 vault lock is the friend API's 503.
+/// The automation backend's 423 vault lock is the friend API's 503. A 500 is already the
+/// generic one; anything else (raw vault or launcher text, maybe with paths) becomes it too.
 pub fn lock_err(e: ApiError) -> ApiError {
-    if e.status == 423 {
-        locked()
-    } else {
-        e
+    match e.status {
+        423 => locked(),
+        500 => e,
+        _ => internal(e.message),
     }
+}
+
+/// `lock_err` for a reconnect: the launcher's 400 (an ordinary refusal) stays a 400 with
+/// fixed words, so the friend learns the game did not start; its text goes to the log only.
+pub fn launch_err(e: ApiError) -> ApiError {
+    if e.status != 400 {
+        return lock_err(e);
+    }
+    log::warn!("friend: reconnect refused: {}", e.message);
+    ApiError::new(400, "bad_request", "Could not start the game.")
 }
 
 /// Reconnect destination: the link given, else the account's saved target (the launcher
@@ -109,9 +124,14 @@ pub fn reconnect_bar(
         Ok((bar, true))
     };
     match link.map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()) {
-        // Game links and place ids only: a name search would probe the owner's recents.
+        // Game links and place ids only: a name search would probe the owner's recents, and
+        // an @username would follow another user.
         Some(l) => match crate::launch::dest::parse_destination(&l) {
-            None | Some(crate::launch::dest::Destination::Query(_)) => Err(ApiError::new(
+            None
+            | Some(
+                crate::launch::dest::Destination::Query(_)
+                | crate::launch::dest::Destination::Follow(_),
+            ) => Err(ApiError::new(
                 400,
                 "bad_link",
                 "Paste a Roblox game link or place ID.",
@@ -145,6 +165,9 @@ pub fn link_of(public_url: &str) -> Result<String, String> {
 /// OS-wrapped token and password in the data dir.
 const TOKEN_FILE: &str = "friend-token.bin";
 const PASSWORD_FILE: &str = "friend-password.bin";
+/// The owner's own login (`owner_username`), saved the same way.
+const OWNER_TOKEN_FILE: &str = "friend-owner-token.bin";
+const OWNER_PASSWORD_FILE: &str = "friend-owner-password.bin";
 /// No look-alikes (I l O o 0 1): 56 symbols.
 const PW_CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
 const PW_LEN: usize = 20;
@@ -254,6 +277,9 @@ type Slot<'a> = (&'static str, &'a RwLock<String>, fn(&str) -> bool);
 struct Ctx {
     token: Arc<RwLock<String>>,
     password: Arc<RwLock<String>>,
+    /// The owner login's token and password (see `owner_username`).
+    owner_token: Arc<RwLock<String>>,
+    owner_password: Arc<RwLock<String>>,
     settings: Arc<Mutex<Value>>,
     /// Times of recent failed logins per client IP (the brute-force window).
     fails: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
@@ -315,23 +341,45 @@ impl Ctx {
             == Some(&Value::Bool(true))
     }
 
-    fn token_ok(&self, given: &str) -> bool {
+    /// The login a bearer token belongs to: `Some(true)` the owner's (every account),
+    /// `Some(false)` the friend's (shared accounts only). The owner's token works only
+    /// while an owner username is set.
+    fn token_role(&self, given: &str) -> Option<bool> {
         use subtle::ConstantTimeEq;
-        let t = self.token.read().unwrap_or_else(PoisonError::into_inner);
-        bool::from(t.as_bytes().ct_eq(given.as_bytes()))
+        let eq = |t: &RwLock<String>| {
+            let t = t.read().unwrap_or_else(PoisonError::into_inner);
+            bool::from(t.as_bytes().ct_eq(given.as_bytes()))
+        };
+        let owner_on =
+            owner_username(&self.settings.lock().unwrap_or_else(PoisonError::into_inner)).is_some();
+        match (eq(&self.token), eq(&self.owner_token) && owner_on) {
+            (true, _) => Some(false),
+            (_, true) => Some(true),
+            _ => None,
+        }
     }
 
-    /// Username case-insensitive; both compared in constant time (per length), never
-    /// short-circuited.
-    fn login_ok(&self, user: &str, pw: &str) -> bool {
+    /// The login a username and password are for (as `token_role`). Username
+    /// case-insensitive; both compared in constant time (per length), never short-circuited.
+    fn login_role(&self, user: &str, pw: &str) -> Option<bool> {
         use subtle::ConstantTimeEq;
-        let want = username(&self.settings.lock().unwrap_or_else(PoisonError::into_inner));
-        let p = self.password.read().unwrap_or_else(PoisonError::into_inner);
-        let u_ok = want
-            .to_lowercase()
-            .as_bytes()
-            .ct_eq(user.trim().to_lowercase().as_bytes());
-        bool::from(u_ok & p.as_bytes().ct_eq(pw.as_bytes()))
+        let (friend, owner) = {
+            let s = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+            (username(&s), owner_username(&s))
+        };
+        let user = user.trim().to_lowercase();
+        let hit = |name: &str, secret: &RwLock<String>| {
+            let p = secret.read().unwrap_or_else(PoisonError::into_inner);
+            let u_ok = name.to_lowercase().as_bytes().ct_eq(user.as_bytes());
+            bool::from(u_ok & p.as_bytes().ct_eq(pw.as_bytes()))
+        };
+        let as_friend = hit(&friend, &self.password);
+        let as_owner = owner.is_some_and(|n| hit(&n, &self.owner_password));
+        match (as_friend, as_owner) {
+            (true, _) => Some(false),
+            (_, true) => Some(true),
+            _ => None,
+        }
     }
 }
 
@@ -342,6 +390,24 @@ fn username(s: &Value) -> String {
         .unwrap_or("friend")
         .to_owned()
 }
+
+/// `/friend/ownerUsername`: the owner's own login name, if set (trimmed, 1 to 32 chars).
+/// That login sees and controls every account, not only the shared ones.
+/// ponytail: no settings row yet: the name is set in settings.json, and its password
+/// (`friend-owner-password.bin`) changes only when that file is deleted. Add the row and a
+/// "New password" for it when more than the app's author uses this.
+fn owner_username(s: &Value) -> Option<String> {
+    s.pointer("/friend/ownerUsername")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| (1..=32).contains(&n.chars().count()))
+        .map(str::to_owned)
+}
+
+/// The login behind a request: the owner (true) sees every account, the friend only the
+/// shared ones.
+#[derive(Clone, Copy)]
+struct Owner(bool);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -370,12 +436,16 @@ impl Friend {
     pub fn new(settings: Arc<Mutex<Value>>, backend: Arc<dyn Backend>) -> Self {
         // In memory until `ensure_token` loads the saved ones or saves these.
         let (token, password) = (new_token(), random_password());
-        crate::logging::register_secret(&token);
-        crate::logging::register_secret(&password);
+        let (owner_token, owner_password) = (new_token(), random_password());
+        for s in [&token, &password, &owner_token, &owner_password] {
+            crate::logging::register_secret(s);
+        }
         Friend {
             ctx: Ctx {
                 token: Arc::new(RwLock::new(token)),
                 password: Arc::new(RwLock::new(password)),
+                owner_token: Arc::new(RwLock::new(owner_token)),
+                owner_password: Arc::new(RwLock::new(owner_password)),
                 settings,
                 fails: Arc::default(),
                 actions: Arc::default(),
@@ -397,10 +467,16 @@ impl Friend {
         read_secret(&self.ctx.token)
     }
 
-    fn secrets(&self) -> [Slot<'_>; 2] {
+    fn secrets(&self) -> [Slot<'_>; 4] {
         [
             (TOKEN_FILE, &*self.ctx.token, valid_token),
             (PASSWORD_FILE, &*self.ctx.password, valid_password),
+            (OWNER_TOKEN_FILE, &*self.ctx.owner_token, valid_token),
+            (
+                OWNER_PASSWORD_FILE,
+                &*self.ctx.owner_password,
+                valid_password,
+            ),
         ]
     }
 
@@ -442,6 +518,14 @@ impl Friend {
         Ok(read_secret(&self.ctx.password))
     }
 
+    /// Secret: the owner login's password (same rule as `password`).
+    pub fn owner_password(&self) -> Result<String, String> {
+        if !*self.loaded() {
+            return Err("The owner password isn't ready yet. Try again in a moment.".into());
+        }
+        Ok(read_secret(&self.ctx.owner_password))
+    }
+
     fn loaded(&self) -> std::sync::MutexGuard<'_, bool> {
         self.token_loaded
             .lock()
@@ -474,12 +558,20 @@ impl Friend {
     /// never comes back. Blocking.
     pub fn new_password(&self, root: &std::path::Path, os: impl FnOnce() -> OsResult) -> String {
         let mut done = self.loaded();
+        let os = os();
+        // Not loaded yet (remote off at startup, or a keyring error): load the owner login's
+        // saved secrets first, or `ensure_token` never will once this marks them loaded.
+        if let (false, Ok(os)) = (*done, &os) {
+            for (file, cell, valid) in self.secrets().into_iter().skip(2) {
+                load_or_save(&root.join(file), cell, valid, &**os);
+            }
+        }
         *done = true;
         write_secret(&self.ctx.token, new_token());
         self.ctx.drop_add(); // the signed-out friend's code must not add anything
         write_secret(&self.ctx.password, random_password());
-        let os = os();
-        for (file, cell, _) in self.secrets() {
+        // The friend's two only: the owner's are not replaced here, so their files stay.
+        for (file, cell, _) in self.secrets().into_iter().take(2) {
             let path = root.join(file);
             let r = os
                 .clone()
@@ -510,7 +602,8 @@ impl Friend {
 
     /// Match the settings: serve on `127.0.0.1:/friend/port` while `/friend/enabled`,
     /// rebind on a port change or a dead server, stop when disabled.
-    pub async fn sync(&self) -> Result<(), String> {
+    /// A bind error keeps its kind (`AddrInUse`: another program may hold the port).
+    pub async fn sync(&self) -> std::io::Result<()> {
         // Settings saved: adding turned off (or the remote) ends a pending add now.
         if !self.ctx.can_add() || !self.enabled() {
             self.ctx.drop_add();
@@ -538,11 +631,14 @@ impl Friend {
         Ok(())
     }
 
-    async fn bind(&self, port: u16) -> Result<Running, String> {
+    async fn bind(&self, port: u16) -> std::io::Result<Running> {
         let l = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
-            .map_err(|e| format!("Could not open the friend server on port {port}: {e}"))?;
-        let addr = l.local_addr().map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                let msg = format!("Could not open the friend server on port {port}: {e}");
+                std::io::Error::new(e.kind(), msg)
+            })?;
+        let addr = l.local_addr()?;
         self.ctx.port.store(addr.port(), Ordering::Relaxed);
         let (stop, rx) = oneshot::channel::<()>();
         let app = router(self.ctx.clone());
@@ -741,13 +837,16 @@ async fn host_guard(State(c): State<Ctx>, req: Request, next: Next) -> Response 
     ApiError::new(403, "forbidden_host", "Wrong host for the friend remote").into_response()
 }
 
-/// Client IP from the first X-Forwarded-For value (trimmed, max 64 chars). Safe: only the
-/// loopback Funnel proxy reaches the port. No header: one shared fallback key.
+/// Client IP from the last X-Forwarded-For value (trimmed, max 64 chars). Only the loopback
+/// Funnel proxy reaches the port, and it drops the caller's X-Forwarded-For and sets its own
+/// (tailscale ipn/ipnlocal/serve.go, addProxyForwardedHeaders). The last value is the one
+/// the nearest proxy wrote, so a caller can't rotate it even behind a proxy that appends.
+/// No header: one shared fallback key.
 fn client_key(h: &HeaderMap) -> (String, bool) {
     match h
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or_default().trim())
+        .map(|v| v.rsplit(',').next().unwrap_or_default().trim())
         .filter(|v| !v.is_empty())
     {
         Some(ip) => (ip.chars().take(64).collect(), true),
@@ -782,17 +881,18 @@ fn give_back<T>(c: &Ctx, id: &str, r: ApiResult<T>) -> ApiResult<T> {
     r
 }
 
-async fn auth(State(c): State<Ctx>, req: Request, next: Next) -> Response {
-    let ok = req
+async fn auth(State(c): State<Ctx>, mut req: Request, next: Next) -> Response {
+    let role = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .is_some_and(|(_, t)| c.token_ok(t.trim()));
-    if !ok {
+        .and_then(|(_, t)| c.token_role(t.trim()));
+    let Some(owner) = role else {
         return ApiError::new(401, "unauthorized", "Missing or wrong friend token").into_response();
-    }
+    };
+    req.extensions_mut().insert(Owner(owner));
     next.run(req).await
 }
 
@@ -847,8 +947,9 @@ async fn login(
             "Too many tries. Wait a minute.",
         ));
     }
-    if c.login_ok(&b.username, &b.password) {
-        return Ok(Json(json!({ "token": read_secret(&c.token) })).into_response());
+    if let Some(owner) = c.login_role(&b.username, &b.password) {
+        let t = if owner { &c.owner_token } else { &c.token };
+        return Ok(Json(json!({ "token": read_secret(t) })).into_response());
     }
     fails.push_back(now);
     log::warn!("friend: failed login");
@@ -859,12 +960,16 @@ async fn login(
     ))
 }
 
-async fn list(State(c): State<Ctx>) -> Res {
-    Ok(Json(c.backend.friend_list().await?).into_response())
+async fn list(State(c): State<Ctx>, Extension(Owner(owner)): Extension<Owner>) -> Res {
+    Ok(Json(c.backend.friend_list(owner).await?).into_response())
 }
 
-async fn avatar(State(c): State<Ctx>, Path(id): Path<String>) -> Res {
-    let png = c.backend.friend_avatar(&id).await?;
+async fn avatar(
+    State(c): State<Ctx>,
+    Extension(Owner(owner)): Extension<Owner>,
+    Path(id): Path<String>,
+) -> Res {
+    let png = c.backend.friend_avatar(&id, owner).await?;
     let h = [
         (CONTENT_TYPE, "image/png"),
         (CACHE_CONTROL, "private, max-age=300"),
@@ -872,9 +977,13 @@ async fn avatar(State(c): State<Ctx>, Path(id): Path<String>) -> Res {
     Ok((h, png).into_response())
 }
 
-async fn disconnect(State(c): State<Ctx>, Path(id): Path<String>) -> Res {
+async fn disconnect(
+    State(c): State<Ctx>,
+    Extension(Owner(owner)): Extension<Owner>,
+    Path(id): Path<String>,
+) -> Res {
     take_slot(&c, &id)?;
-    give_back(&c, &id, c.backend.friend_disconnect(&id).await)?;
+    give_back(&c, &id, c.backend.friend_disconnect(&id, owner).await)?;
     Ok(Json(json!({})).into_response())
 }
 
@@ -885,6 +994,7 @@ struct ReconnectBody {
 
 async fn reconnect(
     State(c): State<Ctx>,
+    Extension(Owner(owner)): Extension<Owner>,
     Path(id): Path<String>,
     b: Result<Json<ReconnectBody>, JsonRejection>,
 ) -> Res {
@@ -895,18 +1005,33 @@ async fn reconnect(
         Err(e) => return Err(body_err(e)),
     };
     take_slot(&c, &id)?;
-    let batch = give_back(&c, &id, c.backend.friend_reconnect(&id, body.link).await)?;
+    let batch = give_back(
+        &c,
+        &id,
+        c.backend.friend_reconnect(&id, body.link, owner).await,
+    )?;
     Ok(Json(json!({ "batch": batch })).into_response())
 }
 
+/// Adding is the friend's only: the owner's login gets "adding is off" (he adds accounts in
+/// the app), and never touches the friend's pending add or its slot.
+fn friend_only(Owner(owner): Owner) -> ApiResult<()> {
+    if owner {
+        return Err(add_off());
+    }
+    Ok(())
+}
+
 /// May the friend add accounts, and how many he has.
-async fn add_info(State(c): State<Ctx>) -> Res {
+async fn add_info(State(c): State<Ctx>, Extension(Owner(owner)): Extension<Owner>) -> Res {
     let added = c.backend.friend_added().await?;
-    Ok(Json(json!({ "allowed": c.can_add(), "max": MAX_ADDED, "added": added })).into_response())
+    let allowed = !owner && c.can_add();
+    Ok(Json(json!({ "allowed": allowed, "max": MAX_ADDED, "added": added })).into_response())
 }
 
 /// A Quick Log In code for the friend to type into Roblox. A live one is handed out again.
-async fn add_start(State(c): State<Ctx>) -> Res {
+async fn add_start(State(c): State<Ctx>, Extension(o): Extension<Owner>) -> Res {
+    friend_only(o)?;
     let _one = c.add_gate.lock().await;
     c.allow_add()?;
     if c.backend.friend_added().await? >= MAX_ADDED {
@@ -975,7 +1100,8 @@ async fn add_start(State(c): State<Ctx>) -> Res {
 
 /// Where the pending add is. Asks Roblox at most every `ADD_POLL`; once the friend confirms,
 /// signs in and adds the account in the background (the page keeps polling).
-async fn add_status(State(c): State<Ctx>) -> Res {
+async fn add_status(State(c): State<Ctx>, Extension(o): Extension<Owner>) -> Res {
+    friend_only(o)?;
     c.allow_add()?;
     let expired = || Ok(Json(json!({ "status": "expired" })).into_response());
     let (code, key, gen) = {
@@ -1062,16 +1188,25 @@ impl Drop for LinkedGuard {
 /// remote off) stops it before sign-in and again right before the vault write.
 async fn finish_add(c: Ctx, code: String, key: Zeroizing<String>, gen: u64) {
     let _stuck = LinkedGuard(c.clone(), code.clone());
-    let g = c.clone();
-    let ok: crate::automation::AddGate =
-        Arc::new(move || g.can_add() && g.remote_on() && g.add_gen.load(Ordering::SeqCst) == gen);
+    let (g, c2) = (c.clone(), code.clone());
+    // Still linked too: once status marked it stuck (the friend was told it failed), the
+    // account must not be added after all.
+    let ok: crate::automation::AddGate = Arc::new(move || {
+        g.can_add()
+            && g.remote_on()
+            && g.add_gen.load(Ordering::SeqCst) == gen
+            && g.add_slot()
+                .as_ref()
+                .is_some_and(|p| p.code == c2 && matches!(p.state, AddState::Linked(_)))
+    });
     let r = c
         .backend
         .friend_add_finish(&code, &crate::roblox::Secret::new(key.as_str()), ok)
         .await;
     // Own statement: the slot lock is released before `_stuck` drops (it locks it too).
     let mut g = c.add_slot();
-    if let Some(p) = g.as_mut().filter(|p| p.code == code) {
+    let linked = |p: &&mut Pending| p.code == code && matches!(p.state, AddState::Linked(_));
+    if let Some(p) = g.as_mut().filter(linked) {
         p.state = match r {
             Ok(name) => AddState::Done(name),
             Err(e) => AddState::Failed(e.message),
@@ -1081,7 +1216,8 @@ async fn finish_add(c: Ctx, code: String, key: Zeroizing<String>, gen: u64) {
 }
 
 /// Stop the pending add (Roblox is told too, best effort).
-async fn add_cancel(State(c): State<Ctx>) -> Res {
+async fn add_cancel(State(c): State<Ctx>, Extension(o): Extension<Owner>) -> Res {
+    friend_only(o)?;
     c.allow_add()?;
     let code = {
         let mut g = c.add_slot();
@@ -1292,6 +1428,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn launch_err_keeps_a_refusal_400_with_fixed_words() {
+        let e = launch_err(ApiError::new(400, "bad_request", "raw C:\\x text"));
+        assert_eq!(
+            (e.status, e.message.as_str()),
+            (400, "Could not start the game.")
+        );
+        assert_eq!(launch_err(ApiError::new(409, "x", "C:\\x")).status, 500);
+        assert_eq!(launch_err(ApiError::new(423, "x", "C:\\x")).status, 503);
+    }
+
     #[tokio::test]
     async fn static_index_served_without_token() {
         let d = tempfile::tempdir().unwrap();
@@ -1420,6 +1567,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_login_gets_every_account_friend_only_shared() {
+        let d = tempfile::tempdir().unwrap();
+        let (_h, f) = setup(d.path(), Box::new(NoPlat));
+        let owner_pw = read_secret(&f.ctx.owner_password);
+        // No owner username set: no owner login, and its token is refused.
+        assert_eq!(login(&f, "boss", &owner_pw).await.0, 401);
+        let owner_t = format!("Bearer {}", read_secret(&f.ctx.owner_token));
+        assert_eq!(call(&f, "GET", "/v1/accounts", Some(&owner_t)).await.0, 401);
+        f.ctx.settings.lock().unwrap()["friend"]["ownerUsername"] = json!("Boss");
+        // The friend's password does not open the owner login, nor the other way round.
+        assert_eq!(login(&f, "boss", &pw(&f)).await.0, 401);
+        assert_eq!(login(&f, "friend", &owner_pw).await.0, 401);
+        let (s, b) = login(&f, " BOSS ", &owner_pw).await;
+        assert_eq!(s, 200);
+        let t = format!("Bearer {}", b["token"].as_str().unwrap());
+        assert_ne!(t, bearer(&f), "its own token");
+        let ids = |b: Value| -> Vec<String> {
+            let l = b.as_array().unwrap().iter();
+            l.map(|a| a["id"].as_str().unwrap().to_owned()).collect()
+        };
+        assert_eq!(
+            ids(call(&f, "GET", "/v1/accounts", Some(&t)).await.1),
+            ["A", "B"]
+        );
+        let friend_list = call(&f, "GET", "/v1/accounts", Some(&bearer(&f))).await.1;
+        assert_eq!(ids(friend_list), ["A"]);
+        // Bob is not shared: the friend still gets 404, the owner can act on him.
+        let (s, _) = call(&f, "POST", "/v1/accounts/B/disconnect", Some(&bearer(&f))).await;
+        assert_eq!(s, 404);
+        let (s, _) = call(&f, "POST", "/v1/accounts/B/disconnect", Some(&t)).await;
+        assert_eq!(s, 200);
+        // Owner username cleared: the owner token stops working at once.
+        f.ctx.settings.lock().unwrap()["friend"]["ownerUsername"] = json!("");
+        assert_eq!(call(&f, "GET", "/v1/accounts", Some(&t)).await.0, 401);
+    }
+
+    #[tokio::test]
     async fn not_allowed_is_404_same_as_missing() {
         let d = tempfile::tempdir().unwrap();
         let (h, f) = setup(d.path(), Box::new(NoPlat));
@@ -1526,14 +1710,9 @@ mod tests {
             404
         );
         assert!(!f.ctx.actions.lock().unwrap().contains_key("B"));
-        // Window over: allowed.
-        let old = Instant::now() - COOLDOWN;
-        f.ctx
-            .actions
-            .lock()
-            .unwrap()
-            .values_mut()
-            .for_each(|v| *v = old);
+        // Window over: allowed. Cleared, not back-dated: `Instant::now() - COOLDOWN` panics
+        // on a machine booted less than that long ago.
+        f.ctx.actions.lock().unwrap().clear();
         assert_eq!(rc().await.0, 200);
     }
 
@@ -1591,7 +1770,7 @@ mod tests {
 
     #[test]
     fn reconnect_name_search_is_bad_link() {
-        for l in ["Adopt Me", "@x", "https://x"] {
+        for l in ["Adopt Me", "@x", "@Builderman", "https://x"] {
             let e = reconnect_bar(Some(l.into()), true, Some(7)).unwrap_err();
             assert_eq!((e.status, e.code), (400, "bad_link"), "{l}");
         }
@@ -1691,15 +1870,8 @@ mod tests {
         // 11th try in the window: 429 even with the right password.
         let (s, b) = login(&f, "friend", &good).await;
         assert_eq!((s, &b["error"]["code"]), (429, &json!("too_many")));
-        // Window frees: right password works again.
-        let old = Instant::now() - FAIL_WINDOW;
-        f.ctx
-            .fails
-            .lock()
-            .unwrap()
-            .values_mut()
-            .flatten()
-            .for_each(|t| *t = old);
+        // Window frees: right password works again (cleared, not back-dated: see above).
+        f.ctx.fails.lock().unwrap().clear();
         assert_eq!(login(&f, "friend", &good).await.0, 200);
         // Malformed body: 400, not counted.
         let (s, _) = call_body(&f, "POST", "/login", None, Some("{}")).await;
@@ -1731,8 +1903,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (_h, f) = setup(d.path(), Box::new(NoPlat));
         let good = pw(&f);
-        for _ in 0..MAX_FAILS {
-            assert_eq!(login_from(&f, Some(" 1.1.1.1 , 10.0.0.1"), "x").await, 401);
+        // A caller-supplied first value rotates; the proxy's last value keys the guard.
+        for i in 0..MAX_FAILS {
+            let xff = format!(" 7.7.7.{i} , 1.1.1.1 ");
+            assert_eq!(login_from(&f, Some(&xff), "x").await, 401);
         }
         assert_eq!(login_from(&f, Some("1.1.1.1"), &good).await, 429);
         // Another IP and the no-header fallback are not locked out.
@@ -1826,6 +2000,17 @@ mod tests {
         );
         f.ensure_token(d.path(), fake_os);
         assert_eq!(f.password().unwrap(), pw(&f));
+    }
+
+    #[test]
+    fn owner_password_waits_for_the_saved_one() {
+        let d = tempfile::tempdir().unwrap();
+        let (_h, f) = setup(d.path(), Box::new(NoPlat));
+        assert!(f.owner_password().is_err(), "not loaded yet");
+        f.ensure_token(d.path(), fake_os);
+        let own = f.owner_password().unwrap();
+        assert_eq!(own, read_secret(&f.ctx.owner_password));
+        assert_ne!(own, f.password().unwrap());
     }
 
     #[test]
@@ -2050,14 +2235,9 @@ mod tests {
         let (s, b) = call(&f, "POST", "/v1/add/start", Some(&t)).await;
         assert_eq!((s, &b["error"]["code"]), (429, &json!("slow_down")));
         assert_eq!(*r.creates.lock().unwrap(), MAX_STARTS);
-        // Window over: a new code again.
-        let old = Instant::now() - START_WINDOW;
-        f.ctx
-            .add_starts
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .for_each(|t| *t = old);
+        // Window over: a new code again. Cleared, not back-dated: `Instant::now() -
+        // START_WINDOW` panics on a machine booted less than 10 minutes ago.
+        f.ctx.add_starts.lock().unwrap().clear();
         let (s, b) = call(&f, "POST", "/v1/add/start", Some(&t)).await;
         assert_eq!((s, &b["code"]), (200, &json!("CODE06")));
     }
@@ -2525,5 +2705,102 @@ mod tests {
         f.ctx.settings.lock().unwrap()["friend"]["enabled"] = json!(false);
         f.sync().await.unwrap();
         assert!(!f.status().await.running);
+    }
+
+    #[tokio::test]
+    async fn port_taken_marks_the_funnel_entry_for_removal() {
+        let d = tempfile::tempdir().unwrap();
+        let (_h, f) = setup(d.path(), Box::new(NoPlat));
+        f.sync().await.unwrap();
+        assert_eq!(tailscale::orphan_port(&f.status().await), None, "running");
+        let other = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = other.local_addr().unwrap().port();
+        f.ctx.settings.lock().unwrap()["friend"]["port"] = json!(port);
+        let e = f.sync().await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse, "{e}");
+        assert!(e.to_string().contains(&format!("port {port}")), "{e}");
+        assert_eq!(tailscale::orphan_port(&f.status().await), Some(port));
+        // Not an RMI-made address: never ours to remove.
+        f.ctx.settings.lock().unwrap()["friend"]["publicUrl"] = json!("https://friend.example.com");
+        assert_eq!(tailscale::orphan_port(&f.status().await), None);
+    }
+
+    #[tokio::test]
+    async fn owner_login_cannot_add_or_touch_the_friends_add() {
+        let d = tempfile::tempdir().unwrap();
+        let (h, f, r) = setup_add(d.path()).await;
+        f.ctx.settings.lock().unwrap()["friend"]["ownerUsername"] = json!("Boss");
+        let owner = format!("Bearer {}", read_secret(&f.ctx.owner_token));
+        let (_, b) = call(&f, "GET", "/v1/add", Some(&owner)).await;
+        assert_eq!(b, json!({ "allowed": false, "max": 10, "added": 0 }));
+        // The friend's pending code is not shown to, cancelled or dropped by the owner.
+        let (_, code) = call(&f, "POST", "/v1/add/start", Some(&bearer(&f))).await;
+        for (m, p) in [
+            ("POST", "/v1/add/start"),
+            ("GET", "/v1/add/status"),
+            ("POST", "/v1/add/cancel"),
+        ] {
+            let (s, b) = call(&f, m, p, Some(&owner)).await;
+            assert_eq!((s, &b["error"]["code"]), (403, &json!("add_off")), "{p}");
+        }
+        assert_eq!(slot_state(&f).unwrap()["status"], "waiting");
+        let (_, again) = call(&f, "POST", "/v1/add/start", Some(&bearer(&f))).await;
+        assert_eq!(again["code"], code["code"]);
+        assert_eq!(*r.creates.lock().unwrap(), 1);
+        assert_eq!(accounts(&h).len(), 2);
+    }
+
+    #[test]
+    fn new_password_before_load_keeps_the_saved_owner_login() {
+        let d = tempfile::tempdir().unwrap();
+        let (_h, f) = setup(d.path(), Box::new(NoPlat));
+        f.ensure_token(d.path(), fake_os);
+        let owner = read_secret(&f.ctx.owner_password);
+        // Next session: remote off at startup, so nothing loaded before New password.
+        let d2 = tempfile::tempdir().unwrap();
+        let (_h2, g) = setup(d2.path(), Box::new(NoPlat));
+        g.new_password(d.path(), fake_os);
+        assert_eq!(read_secret(&g.ctx.owner_password), owner);
+        assert_eq!(
+            read_secret(&g.ctx.owner_token),
+            read_secret(&f.ctx.owner_token)
+        );
+    }
+
+    #[tokio::test]
+    async fn add_marked_stuck_is_not_stored_later() {
+        let d = tempfile::tempdir().unwrap();
+        let (h, f, r) = setup_add(d.path()).await;
+        let before = accounts(&h);
+        let hold = hold_in_login(&f, &r).await;
+        // The sign-in outlives its deadline: the friend is told it failed.
+        f.ctx.add_slot().as_mut().unwrap().until = Instant::now();
+        let (_, b) = call(&f, "GET", "/v1/add/status", Some(&bearer(&f))).await;
+        assert_eq!(b, json!({ "status": "failed", "message": ADD_STUCK }));
+        drop(hold);
+        wait_for("sign-out", || *r.logouts.lock().unwrap() == 1).await;
+        assert_eq!(accounts(&h), before);
+        assert_eq!(cookie_of(&h, 50), None);
+        assert_eq!(
+            slot_state(&f).unwrap(),
+            json!({ "status": "failed", "message": ADD_STUCK })
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_vault_error_is_generic() {
+        let d = tempfile::tempdir().unwrap();
+        let (h, f) = setup(d.path(), Box::new(NoPlat));
+        // Saving fails: the vault file's place is taken by a directory.
+        let path = h.0.paths.vault();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let (s, b) = call(&f, "POST", "/v1/accounts/A/disconnect", Some(&bearer(&f))).await;
+        assert_eq!((s, &b["error"]["code"]), (500, &json!("internal")));
+        assert_eq!(
+            b["error"]["message"],
+            "Something went wrong on the owner's computer."
+        );
+        assert!(!f.ctx.actions.lock().unwrap().contains_key("A"));
     }
 }

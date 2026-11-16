@@ -95,7 +95,7 @@ test("Show me closes the log and opens the tab or the settings row", () => {
 
 test("every Show me target is a tab or a settings row that exists", () => {
   const rows = new Set(SECTIONS.flatMap((s) => s.items.map((i) => i.path)));
-  const tabs = ["home", "accounts", "discover", "automation", "devices"];
+  const tabs = ["home", "accounts", "discover", "devices"];
   for (const u of UPDATES)
     for (const line of [...(u.added ?? []), ...(u.improved ?? []), ...(u.fixed ?? [])])
       if (typeof line !== "string")

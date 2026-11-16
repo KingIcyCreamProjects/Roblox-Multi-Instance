@@ -260,7 +260,7 @@ impl<H: Host> Backend for AppBackend<H> {
         .ok_or_else(|| ApiError::not_found(format!("{name} has no cookie")))
     }
 
-    async fn friend_list(&self) -> ApiResult<Vec<FriendAccount>> {
+    async fn friend_list(&self, owner: bool) -> ApiResult<Vec<FriendAccount>> {
         let h = self.h()?.clone();
         // tracked_pids walks the process list: off the async workers.
         tokio::task::spawn_blocking(move || {
@@ -270,7 +270,7 @@ impl<H: Host> Backend for AppBackend<H> {
                 let p = g.as_ref().ok_or_else(friend::locked)?.payload();
                 p.accounts
                     .iter()
-                    .filter(|a| a.friend_allowed)
+                    .filter(|a| owner || a.friend_allowed)
                     .map(|a| {
                         (
                             a.id.clone(),
@@ -278,6 +278,7 @@ impl<H: Host> Backend for AppBackend<H> {
                             a.username.clone(),
                             a.tracker_id.clone(),
                             a.friend_paused,
+                            a.user_id,
                         )
                     })
                     .collect()
@@ -289,13 +290,30 @@ impl<H: Host> Backend for AppBackend<H> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let now = chrono::Utc::now().timestamp_millis();
+            // Presence not refreshed for three rounds (90 s at least) is not trusted: a failed
+            // refresh keeps the old entry, and it would read as "in a game" for ever.
+            let stale_ms = {
+                let s = st
+                    .settings
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let every = s.pointer("/presence/intervalSec").and_then(|v| v.as_i64());
+                every.unwrap_or(30).clamp(30, 300) * 3000
+            };
+            let here = st.remote.device_name();
+            // What paired computers say they run: (Roblox user id, computer name).
+            let peers = st.remote.running_elsewhere();
             // One process scan for all accounts (polled every few seconds per viewer).
             let trackers: Vec<String> = accs.iter().map(|a| a.3.clone()).collect();
             let live = st.platform.tracked_clients(&trackers);
             Ok(accs
                 .into_iter()
-                .map(|(id, display_name, username, tracker, paused)| {
-                    let p = pres.get(&id);
+                .map(|(id, display_name, username, tracker, paused, uid)| {
+                    // An entry without a readable time is kept: nothing says it is old.
+                    let p = pres.get(&id).filter(|p| {
+                        chrono::DateTime::parse_from_rfc3339(&p.updated_at)
+                            .map_or(true, |t| now - t.timestamp_millis() < stale_ms)
+                    });
                     let in_game = p.is_some_and(|p| p.state == PresenceState::InGame);
                     let pids: Vec<u32> = live
                         .iter()
@@ -310,19 +328,39 @@ impl<H: Host> Backend for AppBackend<H> {
                     let status = match (running, paused) {
                         (false, true) => "paused",
                         (false, false) => "offline",
+                        // A launch queued or running and no window yet (not the grace after
+                        // one). Before presence: "in a game" may be another computer's client.
+                        _ if pids.is_empty() && st.automation.own_running(&id) => "starting",
                         _ if in_game => "inGame",
                         _ => "online",
                     };
+                    // A paired computer says it has a client for this account: certain, also
+                    // while paused here. Presence alone counts only when not paused (right
+                    // after a Disconnect here Roblox still reports the game for a while).
+                    let peer = uid
+                        .filter(|_| !running)
+                        .and_then(|u| peers.iter().find(|(id, _)| *id == u))
+                        .map(|(_, name)| name.clone());
+                    let elsewhere = peer.is_some() || (in_game && !running && !paused);
                     let started = pids.into_iter().filter_map(crate::watcher::start_ms).min();
                     FriendAccount {
                         id,
                         display_name,
                         username,
                         status,
-                        // also for a client on another computer: the page says where
-                        game: p.filter(|_| in_game).and_then(|p| p.game_name.clone()),
+                        // also for a client on another computer: the page says where.
+                        // Not for an account disconnected here and not seen elsewhere.
+                        game: p
+                            .filter(|_| in_game && (running || elsewhere))
+                            .and_then(|p| p.game_name.clone()),
                         uptime_sec: started.map(|s| (now - s).max(0) as u64 / 1000),
-                        elsewhere: in_game && !running && !paused,
+                        elsewhere,
+                        // Computer names are for the owner's own login only.
+                        computer: match (owner, running) {
+                            (false, _) => None,
+                            (true, true) => Some(here.clone()),
+                            (true, false) => peer,
+                        },
                     }
                 })
                 .collect())
@@ -331,10 +369,10 @@ impl<H: Host> Backend for AppBackend<H> {
         .map_err(friend::internal)?
     }
 
-    async fn friend_disconnect(&self, id: &str) -> ApiResult<()> {
+    async fn friend_disconnect(&self, id: &str, owner: bool) -> ApiResult<()> {
         let h = self.h()?;
         let st = h.st();
-        let (tracker, username, display, was_paused) = friend_account(st, id, |_, a| {
+        let (tracker, username, display, was_paused) = friend_account(st, id, owner, |_, a| {
             (
                 a.tracker_id.clone(),
                 a.username.clone(),
@@ -374,19 +412,25 @@ impl<H: Host> Backend for AppBackend<H> {
         })
     }
 
-    async fn friend_reconnect(&self, id: &str, link: Option<String>) -> ApiResult<String> {
+    async fn friend_reconnect(
+        &self,
+        id: &str,
+        link: Option<String>,
+        owner: bool,
+    ) -> ApiResult<String> {
         let h = self.h()?;
         let st = h.st();
-        let (has_target, last, username, display, paused) = friend_account(st, id, |p, a| {
-            let t = accounts::target_for(p, a).is_some();
-            (
-                t,
-                a.friend_last_place,
-                a.username.clone(),
-                a.display_name.clone(),
-                a.friend_paused,
-            )
-        })?;
+        let (has_target, last, username, display, paused) =
+            friend_account(st, id, owner, |p, a| {
+                let t = accounts::target_for(p, a).is_some();
+                (
+                    t,
+                    a.friend_last_place,
+                    a.username.clone(),
+                    a.display_name.clone(),
+                    a.friend_paused,
+                )
+            })?;
         // A queued/running launch (or its grace) refuses another; paused skips only the grace,
         // as in friend_list. start_batch counts the launch before its pause save.
         if st.automation.own_running(id) || (!paused && st.automation.own_busy(id)) {
@@ -401,14 +445,14 @@ impl<H: Host> Backend for AppBackend<H> {
                 .await
                 .map_err(friend::internal)?
                 .map_err(cmd_err)
-                .map_err(friend::lock_err)?;
+                .map_err(friend::launch_err)?;
         friend_done(h, "reconnect", &display);
         Ok(batch)
     }
 
-    async fn friend_avatar(&self, id: &str) -> ApiResult<Vec<u8>> {
+    async fn friend_avatar(&self, id: &str, owner: bool) -> ApiResult<Vec<u8>> {
         let st = self.h()?.st();
-        let uid = friend_account(st, id, |_, a| a.user_id)?.ok_or_else(friend::not_found)?;
+        let uid = friend_account(st, id, owner, |_, a| a.user_id)?.ok_or_else(friend::not_found)?;
         tokio::fs::read(accounts::cmds::thumb_file(st, uid, 48))
             .await
             .map_err(|_| friend::not_found())
@@ -512,9 +556,11 @@ async fn friend_store<H: Host>(h: &H, start: Gen, ck: &Secret, ok: AddGate) -> A
 }
 
 /// The friend-allowed account `id`; any other id is the same 404 (no probing which exist).
+/// `owner` (the owner's own login): any account.
 fn friend_account<T>(
     st: &AppState,
     id: &str,
+    owner: bool,
     f: impl FnOnce(&crate::vault::model::VaultPayload, &Account) -> T,
 ) -> ApiResult<T> {
     let g = guard(&st.vault);
@@ -522,7 +568,7 @@ fn friend_account<T>(
     let a = p
         .accounts
         .iter()
-        .find(|a| a.id == id && a.friend_allowed)
+        .find(|a| a.id == id && (owner || a.friend_allowed))
         .ok_or_else(friend::not_found)?;
     Ok(f(p, a))
 }
@@ -877,7 +923,7 @@ pub(crate) mod tests {
         let status =
             |b: Vec<FriendAccount>, id: &str| b.into_iter().find(|a| a.id == id).unwrap().status;
         // A has a live client: paused flag alone must not hide it.
-        let l = b.friend_list().await.unwrap();
+        let l = b.friend_list(false).await.unwrap();
         assert_eq!(status(l.clone(), "A"), "online");
         assert_eq!(status(l, "B"), "paused");
         // B unpaused and launching (no pid, no presence yet): Disconnect stays offered.
@@ -890,7 +936,7 @@ pub(crate) mod tests {
             .accounts[1]
             .friend_paused = false;
         h.0.automation.own_begin(&["B".into()]);
-        assert_eq!(status(b.friend_list().await.unwrap(), "B"), "online");
+        assert_eq!(status(b.friend_list(false).await.unwrap(), "B"), "starting");
         // Presence without an RMI client is not live: the account runs on another computer.
         let ig = crate::accounts::Presence {
             state: PresenceState::InGame,
@@ -907,7 +953,7 @@ pub(crate) mod tests {
         }
         h.0.automation
             .own_end(&["B".into()], tokio::time::Instant::now());
-        let l = b.friend_list().await.unwrap();
+        let l = b.friend_list(false).await.unwrap();
         let get = |id: &str| l.iter().find(|a| a.id == id).unwrap();
         assert_eq!(
             (
@@ -924,6 +970,48 @@ pub(crate) mod tests {
                 get("B").elsewhere
             ),
             ("offline", Some("G"), true)
+        );
+        // The friend login never gets computer names.
+        assert!(l.iter().all(|a| a.computer.is_none()));
+        // The owner's does: this computer for a client here; no name for B yet (only Roblox
+        // presence says it runs somewhere).
+        let here = h.0.remote.device_name();
+        let l = b.friend_list(true).await.unwrap();
+        let get = |id: &str| l.iter().find(|a| a.id == id).unwrap();
+        assert_eq!(get("A").computer.as_deref(), Some(here.as_str()));
+        assert_eq!(
+            (get("B").elsewhere, get("B").computer.as_deref()),
+            (true, None)
+        );
+        // A paired computer reports B (Roblox user id 2): named, and certain even with no
+        // presence and while paused here.
+        h.0.remote.note_running("peer", "Mac", vec![2]);
+        h.0.accounts.presence.lock().unwrap().clear();
+        h.0.vault
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .payload_mut()
+            .accounts[1]
+            .friend_paused = true;
+        let l = b.friend_list(true).await.unwrap();
+        let get = |id: &str| l.iter().find(|a| a.id == id).unwrap();
+        assert_eq!(
+            (
+                get("B").status,
+                get("B").elsewhere,
+                get("B").computer.as_deref()
+            ),
+            ("paused", true, Some("Mac"))
+        );
+        // A report for an account with a client here does not move it.
+        h.0.remote.note_running("peer", "Mac", vec![1, 2]);
+        let l = b.friend_list(true).await.unwrap();
+        let a = l.iter().find(|a| a.id == "A").unwrap();
+        assert_eq!(
+            (a.elsewhere, a.computer.as_deref()),
+            (false, Some(here.as_str()))
         );
     }
 

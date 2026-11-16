@@ -691,6 +691,12 @@ function Single({
   const act = useAccountActions();
   const { play } = usePlay();
   const { data: s } = useSettings();
+  const { data: caps } = useQuery({
+    queryKey: ["caps"],
+    queryFn: () => call("platform_capabilities"),
+  });
+  // no FPS / graphics settings file to write on this OS (same gate as the Settings rows)
+  const clientHelpers = caps?.clientHelpers !== false;
   const focusReq = useUi((u) => u.focusReq);
   const barDest = usePlayBar((b) => !!b.destination.trim());
   const save = (patch: AccountPatch) => void act.update(a.id, patch);
@@ -818,20 +824,24 @@ function Single({
             onPick={(group) => save({ group })}
           />
           <Swatches value={a.color} onPick={(color) => save({ color })} />
-          <NumField
-            value={a.fpsCap}
-            max={240}
-            label="inspector.fps"
-            err="inspector.fpsErr"
-            onCommit={(fpsCap) => save({ fpsCap })}
-          />
-          <NumField
-            value={a.graphics}
-            max={10}
-            label="inspector.graphics"
-            err="inspector.graphicsErr"
-            onCommit={(graphics) => save({ graphics })}
-          />
+          {clientHelpers && (
+            <>
+              <NumField
+                value={a.fpsCap}
+                max={240}
+                label="inspector.fps"
+                err="inspector.fpsErr"
+                onCommit={(fpsCap) => save({ fpsCap })}
+              />
+              <NumField
+                value={a.graphics}
+                max={10}
+                label="inspector.graphics"
+                err="inspector.graphicsErr"
+                onCommit={(graphics) => save({ graphics })}
+              />
+            </>
+          )}
           <Section title={t("inspector.session")}>
             <div className="flex items-center gap-2">
               <p

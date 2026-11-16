@@ -169,9 +169,36 @@ test("pairing removed on the other computer: token dropped, Pair again", async (
     t("dev.removedThere", { name: "Den PC" }),
   );
   expect(mockVault.lastArgs.remote_forget).toEqual({ ip: "100.64.0.11" });
-  expect(
-    await within(await row("Den PC")).findByRole("button", pairBtn("Den PC")),
-  ).toBeInTheDocument();
+  await user.click(await within(await row("Den PC")).findByRole("button", pairBtn("Den PC")));
+  // pairing again clears the old "Pair again" alert
+  const dialog = await screen.findByRole("dialog");
+  expect(screen.queryByText(t("dev.removedThere", { name: "Den PC" }))).toBeNull();
+  await user.type(within(dialog).getByRole("textbox"), "K7MP4XQ2");
+  await user.click(within(dialog).getByRole("button", { name: t("dev.pair") }));
+  await user.click(await screen.findByRole("button", { name: t("dev.done") }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("a watched session counts as activity for the idle auto-lock", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    setup();
+    await user.click(within(await row("Den PC")).getByRole("button", connectBtn("Den PC")));
+    const o = await opened();
+    const onActivity = vi.fn();
+    window.addEventListener(ACTIVITY_EVENT, onActivity);
+    vi.advanceTimersByTime(60_000);
+    expect(onActivity).toHaveBeenCalledTimes(3);
+    o.onClose();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    vi.advanceTimersByTime(60_000);
+    window.removeEventListener(ACTIVITY_EVENT, onActivity);
+    expect(onActivity).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("a build without the viewer says so", async () => {

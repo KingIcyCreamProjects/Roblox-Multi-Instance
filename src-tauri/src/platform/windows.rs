@@ -22,8 +22,8 @@ use windows_sys::Win32::{
         Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
         Gdi::{
             BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-            SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_BOLD,
-            PAINTSTRUCT, TRANSPARENT,
+            MonitorFromRect, SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE,
+            DT_VCENTER, FW_BOLD, MONITOR_DEFAULTTONULL, PAINTSTRUCT, TRANSPARENT,
         },
     },
     System::{
@@ -201,8 +201,10 @@ mod nudge {
     }
 
     /// Click `w`'s chat button twice (open, close: chat ends as it was). Roblox only sees a
-    /// click after the cursor moves onto the button, so it slides in over 3 px first.
-    unsafe fn click_chat(w: HWND) -> bool {
+    /// click after the cursor moves onto the button, so it slides in over 3 px first. Stops
+    /// before a click once the user is back (a real key or click since `t0`), so their input
+    /// goes back to their own window at once (Roblox's chat may be left open).
+    unsafe fn click_chat(w: HWND, t0: u64) -> bool {
         let dpi = GetDpiForWindow(w).max(96) as i32;
         let mut p = POINT {
             x: CHAT.0 * dpi / 96,
@@ -220,6 +222,9 @@ mod nudge {
         for i in 0..2 {
             if i > 0 {
                 sleep(Duration::from_millis(300));
+            }
+            if PRESS.load(Relaxed) > t0 {
+                return false;
             }
             mouse(MOUSEEVENTF_LEFTDOWN, 0);
             sleep(Duration::from_millis(50));
@@ -267,7 +272,9 @@ mod nudge {
 
     pub unsafe fn run(wins: &[HWND]) -> usize {
         let prev = GetForegroundWindow();
-        if wins.is_empty() || (!wins.contains(&prev) && fullscreen_app(prev)) {
+        // `fullscreen` also rules out a maximized captioned window, which covers its monitor
+        // when the taskbar auto-hides or sits on another screen.
+        if wins.is_empty() || (!wins.contains(&prev) && super::fullscreen(prev as isize)) {
             return 0;
         }
         let mut cur: POINT = std::mem::zeroed();
@@ -283,7 +290,7 @@ mod nudge {
             if min {
                 ShowWindow(w, SW_SHOWNOACTIVATE);
             }
-            if focus(w) && click_chat(w) {
+            if focus(w) && click_chat(w, t0) {
                 n += 1;
             }
             if min {
@@ -333,6 +340,18 @@ pub fn set_title(hw: HWND, title: &str) -> bool {
             std::ptr::null_mut(),
         ) != 0
     }
+}
+
+/// Screen rect `(x, y, w, h)` overlaps at least one connected monitor.
+fn on_a_monitor((x, y, w, h): (i32, i32, i32, i32)) -> bool {
+    let r = RECT {
+        left: x,
+        top: y,
+        right: x.saturating_add(w),
+        bottom: y.saturating_add(h),
+    };
+    // SAFETY: plain query on a stack RECT.
+    !unsafe { MonitorFromRect(&r, MONITOR_DEFAULTTONULL) }.is_null()
 }
 
 /// Visible bounds (no invisible resize border) and that border: left, top, right, bottom.
@@ -405,17 +424,23 @@ pub fn arrange_grid(
             }
             // Ask for the target's size; Roblox may grow it to its minimum, so place it by
             // the size it actually took.
-            let b = frame(hw).map_or([0; 4], |f| f.1);
             let (w, h) = t.size();
-            SetWindowPos(
-                hw,
-                std::ptr::null_mut(),
-                c.x - b[0],
-                c.y - b[1],
-                w + b[0] + b[2],
-                h + b[1] + b[3],
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            ) != 0
+            let ask = |b: [i32; 4]| {
+                SetWindowPos(
+                    hw,
+                    std::ptr::null_mut(),
+                    c.x - b[0],
+                    c.y - b[1],
+                    w + b[0] + b[2],
+                    h + b[1] + b[3],
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) != 0
+            };
+            ask(frame(hw).map_or([0; 4], |f| f.1))
+                // A move onto a monitor with another DPI rescales the window (and its
+                // border): size a big one again, now that it is on the target monitor.
+                && (t.small
+                    || frame(hw).is_none_or(|(f, b)| (f[2] - f[0], f[3] - f[1]) == (w, h) || ask(b)))
                 && frame(hw).is_some_and(|(f, b)| {
                     let (x, y) = t.pos(work, (f[2] - f[0], f[3] - f[1]));
                     SetWindowPos(
@@ -632,6 +657,8 @@ impl Platform for Windows {
             cookie_lock: true,
             window_rect: true,
             client_helpers: true,
+            fullscreen_wait: true,
+            audio: true,
         }
     }
 
@@ -803,9 +830,16 @@ impl Platform for Windows {
                     std::thread::sleep(poll_interval(t0.elapsed()));
                     continue;
                 }
+                // A saved rect on a monitor that is gone would open the window off-screen.
+                let rect = rect.filter(|&r| on_a_monitor(r));
                 // SAFETY: hw is a live top-level window from EnumWindows.
                 let ok = unsafe {
                     rect.is_none_or(|(x, y, w, h)| {
+                        // SetWindowPos on a minimized window moves its icon, not the rect it
+                        // restores to: restore first (the minimize below re-minimizes it).
+                        if IsIconic(hw) != 0 {
+                            ShowWindow(hw, SW_SHOWNOACTIVATE);
+                        }
                         SetWindowPos(
                             hw,
                             std::ptr::null_mut(),
@@ -937,6 +971,17 @@ fn holder_done(roblox_clients: usize, rmi_processes: usize) -> bool {
     roblox_clients == 0 && rmi_processes == 0
 }
 
+/// Checks in a row that found nothing left (the holder lets go at two). A process list that
+/// does not show the holder itself is not believed: a failed snapshot reads as "nothing
+/// runs", and letting go then makes Roblox close every client but one.
+fn holder_idle(idle: u32, seen_self: bool, roblox_clients: usize, rmi_processes: usize) -> u32 {
+    if seen_self && holder_done(roblox_clients, rmi_processes) {
+        idle + 1
+    } else {
+        0
+    }
+}
+
 /// Body of the holder process: owns `ROBLOX_singletonMutex` outside RMI, so closing or
 /// crashing RMI (or updating it) never releases it. Prints `ok` / `busy` for the spawner.
 /// Exits once no Roblox client and no `main_exe` remain (polled every 15 s), or when RMI
@@ -966,13 +1011,17 @@ pub fn run_holder(main_exe: &str) -> i32 {
             return 2;
         }
         say("ok");
-        // Two process snapshots per check, all night: slow polls (the stop event is instant).
+        // One process snapshot per check, all night: slow polls (the stop event is instant).
+        let mut idle = 0;
         while WaitForSingleObject(stop, 15_000) == WAIT_TIMEOUT {
-            let rmi = process_ids(main_exe)
-                .into_iter()
-                .filter(|&p| p != me)
-                .count();
-            if holder_done(process_ids(PLAYER_EXE).len(), rmi) {
+            let all = processes().unwrap_or_default();
+            let count = |exe: &str| {
+                let named = all.iter().filter(|(_, n)| n.eq_ignore_ascii_case(exe));
+                named.filter(|(p, _)| *p != me).count()
+            };
+            let seen_self = all.iter().any(|(p, _)| *p == me);
+            idle = holder_idle(idle, seen_self, count(PLAYER_EXE), count(main_exe));
+            if idle >= 2 {
                 break;
             }
         }
@@ -1201,26 +1250,33 @@ fn utf16z(b: &[u16]) -> String {
     String::from_utf16_lossy(&b[..len])
 }
 
-fn process_ids(exe: &str) -> Vec<u32> {
+/// Every running process as (pid, exe file name). `None`: the snapshot could not be taken
+/// (it can fail when the system is short on memory), which is not the same as "none run".
+fn processes() -> Option<Vec<(u32, String)>> {
     let mut out = vec![];
     // SAFETY: snapshot handle checked and closed; entry sized per API contract.
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
-            return out;
+            return None;
         }
         let mut e: PROCESSENTRY32W = std::mem::zeroed();
         e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         let mut ok = Process32FirstW(snap, &mut e) != 0;
         while ok {
-            if utf16z(&e.szExeFile).eq_ignore_ascii_case(exe) {
-                out.push(e.th32ProcessID);
-            }
+            out.push((e.th32ProcessID, utf16z(&e.szExeFile)));
             ok = Process32NextW(snap, &mut e) != 0;
         }
         CloseHandle(snap);
     }
-    out
+    (!out.is_empty()).then_some(out)
+}
+
+fn process_ids(exe: &str) -> Vec<u32> {
+    let all = processes().unwrap_or_default().into_iter();
+    all.filter(|(_, n)| n.eq_ignore_ascii_case(exe))
+        .map(|(p, _)| p)
+        .collect()
 }
 
 /// Another process's command line (`ProcessCommandLineInformation`, Win 8.1+).
@@ -1810,11 +1866,24 @@ mod tests {
     }
 
     #[test]
+    fn saved_rect_off_every_monitor_is_rejected() {
+        assert!(!on_a_monitor((-1_000_000, -1_000_000, 800, 600)));
+        assert!(!on_a_monitor((i32::MAX - 10, 0, 800, 600)));
+    }
+
+    #[test]
     fn holder_exits_only_when_nothing_left() {
         assert!(holder_done(0, 0));
         assert!(!holder_done(1, 0), "a client would close itself on release");
         assert!(!holder_done(0, 1), "RMI still wants it held");
         assert!(!holder_done(3, 1));
+        // Lets go only after two believed checks in a row; a process list without the holder
+        // itself (a failed snapshot) never counts.
+        assert_eq!(holder_idle(0, true, 0, 0), 1);
+        assert_eq!(holder_idle(1, true, 0, 0), 2);
+        assert_eq!(holder_idle(1, false, 0, 0), 0);
+        assert_eq!(holder_idle(1, true, 1, 0), 0);
+        assert!(processes().is_some_and(|all| all.iter().any(|(p, _)| *p == std::process::id())));
     }
 
     #[test]

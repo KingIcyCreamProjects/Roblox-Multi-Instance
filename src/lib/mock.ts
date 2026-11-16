@@ -59,7 +59,14 @@ const DEFAULTS: Record<string, unknown> = {
     enableSecrets: false,
   },
   net: { allowLan: false },
-  friend: { enabled: false, port: 7812, publicUrl: "", username: "friend", canAdd: false },
+  friend: {
+    enabled: false,
+    port: 7812,
+    publicUrl: "",
+    username: "friend",
+    ownerUsername: "",
+    canAdd: false,
+  },
   remote: { enabled: false, port: 7813, deviceName: "", files: false, audio: true },
   relaunch: { spacingSec: 9, defaultDelaySec: 60, checkInternet: true, usePresence: false },
   clients: { minimizeEverySec: 0, closeAfterMin: 0, closeScope: "instance", maxInstances: 0 },
@@ -142,6 +149,8 @@ const CAPS = {
   windowRect: true,
   watcher: true,
   clientHelpers: true,
+  fullscreenWait: true,
+  audio: true,
 };
 export const mockCaps = { ...CAPS };
 /** Test knob: encoding of the mock old-manager AccountData.json. */
@@ -238,6 +247,7 @@ const now = Date.now();
 const MOCK_TOKEN = "deadbeef".repeat(7) + "cafe1234";
 const MOCK_PW = "Mock2Friend3Pass4Abc";
 let mockFriendPw = MOCK_PW;
+const MOCK_OWNER_PW = "Own7Mock5Login2Xyz";
 const fakeClients: Record<string, unknown>[] = [
   {
     account: "Alice",
@@ -674,6 +684,7 @@ function launchCall(cmd: string, a: Record<string, unknown>): unknown {
         setTimeout(() => !cancelled.has(batchId) && p(id, "validating"), t);
         setTimeout(() => !cancelled.has(batchId) && p(id, "launching"), t + 200);
         setTimeout(() => {
+          if (gen !== launchGen) return; // a later test: no recent, no emit
           if (cancelled.has(batchId)) {
             done.cancelled++;
             p(id, "cancelled");
@@ -1008,7 +1019,10 @@ export async function mockCall(cmd: string, args?: unknown): Promise<unknown> {
     case "friend_password":
       return mockFriendPw;
     case "friend_password_copy":
+    case "friend_owner_password_copy":
       return undefined;
+    case "friend_owner_password":
+      return MOCK_OWNER_PW;
     case "friend_new_password":
       return (mockFriendPw = mockFriendPw === MOCK_PW ? "Zx8Kq2Wm9Rt4Yp7Hc3Nd" : MOCK_PW);
     case "automation_token_copy": {
@@ -1031,7 +1045,7 @@ export async function mockCall(cmd: string, args?: unknown): Promise<unknown> {
     case "automation_save_console":
       return true;
     case "automation_relaunch_set": {
-      const a = args as { account: string; enabled: boolean; delaySec: number };
+      const a = args as { account: string; enabled: boolean; delaySec?: number };
       const c = fakeClients.find((x) => x.account === a.account);
       if (!c) throw new Error(`${a.account} has never connected`);
       c.relaunch = { enabled: a.enabled, seconds: a.delaySec };

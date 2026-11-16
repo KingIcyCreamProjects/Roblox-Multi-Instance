@@ -101,6 +101,8 @@ fn main() {
             "friend_link",
             "friend_password",
             "friend_password_copy",
+            "friend_owner_password",
+            "friend_owner_password_copy",
             "friend_new_password",
             "friend_ts_status",
             "friend_ts_enable",

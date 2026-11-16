@@ -489,6 +489,18 @@ pub async fn friend_password_copy(app: AppHandle, state: State<'_, AppState>) ->
     copy_text(app, &state, g, &pw, true)
 }
 
+/// Copy the owner login's password, the same way.
+#[tauri::command]
+pub async fn friend_owner_password_copy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<()> {
+    let g = gen(&state);
+    crate::commands::friend_token(&app).await;
+    let pw = Zeroizing::new(state.friend.owner_password()?);
+    copy_text(app, &state, g, &pw, true)
+}
+
 fn token_text(tok: &str, template: Option<&str>) -> CmdResult<Zeroizing<String>> {
     if tok.is_empty() {
         return Err("No token yet. Turn on Automation first.".into());
@@ -591,7 +603,7 @@ pub async fn reauth(
     let password = password.map(Zeroizing::new);
     let start = gen(&state);
     if keys(&state.vault)?.mode() == Mode::Os {
-        os_confirm(&app).await?;
+        os_confirm(&app, false).await?;
     } else {
         require_password(&state.vault, password.as_deref().map(|s| s.as_str()))?;
     }
@@ -609,18 +621,25 @@ pub async fn reauth(
 
 /// OS-mode user presence for a bulk secret export (password mode re-types the password):
 /// never weaker than copying one cookie. A fresh `reauth` window counts.
-pub(crate) async fn os_presence(app: &AppHandle, st: &AppState) -> CmdResult<()> {
+/// `no_hello_ok`: on a device without Windows Hello, fall back to the plain OK / Cancel
+/// dialog (giving the vault a password must stay possible there). A cancelled or failed
+/// Hello still refuses.
+pub(crate) async fn os_presence(
+    app: &AppHandle,
+    st: &AppState,
+    no_hello_ok: bool,
+) -> CmdResult<()> {
     if keys(&st.vault)?.mode() == Mode::Os && !reauthed(st) {
-        os_confirm(app).await?;
+        os_confirm(app, no_hello_ok).await?;
     }
     Ok(())
 }
 
 const CONFIRM_MSG: &str = "Roblox Multi Instance wants to show or copy a saved secret.";
 
-/// Windows Hello user-presence check on the main window.
+/// Windows Hello user-presence check on the main window. `no_hello_ok`: see `os_presence`.
 #[cfg(windows)]
-async fn os_confirm(app: &AppHandle) -> CmdResult<()> {
+async fn os_confirm(app: &AppHandle, no_hello_ok: bool) -> CmdResult<()> {
     use windows::core::HSTRING;
     use windows::Security::Credentials::UI::{
         UserConsentVerificationResult as R, UserConsentVerifier,
@@ -648,6 +667,9 @@ async fn os_confirm(app: &AppHandle) -> CmdResult<()> {
     match r {
         Ok(R::Verified) => Ok(()),
         Ok(R::Canceled) => Err("Cancelled.".into()),
+        Ok(R::DeviceNotPresent | R::NotConfiguredForUser | R::DisabledByPolicy) if no_hello_ok => {
+            plain_confirm(app).await
+        }
         Ok(R::DeviceNotPresent | R::NotConfiguredForUser | R::DisabledByPolicy) => Err(
             "Windows Hello is not set up, so Windows can't confirm it's you. Set up a PIN in Windows Settings, or give the vault a password."
                 .into(),
@@ -662,7 +684,12 @@ async fn os_confirm(app: &AppHandle) -> CmdResult<()> {
 
 // ponytail: plain confirm dialog on mac/linux (presence, not identity); LocalAuthentication/polkit later.
 #[cfg(not(windows))]
-async fn os_confirm(app: &AppHandle) -> CmdResult<()> {
+async fn os_confirm(app: &AppHandle, _no_hello_ok: bool) -> CmdResult<()> {
+    plain_confirm(app).await
+}
+
+/// OK / Cancel dialog: presence, not identity.
+async fn plain_confirm(app: &AppHandle) -> CmdResult<()> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     let d = app
         .dialog()

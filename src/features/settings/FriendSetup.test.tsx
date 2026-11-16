@@ -67,6 +67,24 @@ test("on macOS the sign-in step says menu bar, not tray", async () => {
   expect(screen.queryByText(t("fs.step2.win"))).toBeNull();
 });
 
+test("on Linux the sign-in step says tailscale up", async () => {
+  mockCaps.os = "linux";
+  setup();
+  expect(await screen.findByText(t("fs.step2.linux"))).toBeInTheDocument();
+  expect(screen.getByText(t("fs.step2.linux"))).toHaveTextContent("tailscale up");
+  mockCaps.os = "windows";
+});
+
+test("each step says its state in words and the download is a direct button", async () => {
+  Object.assign(mockTs.status, { installed: true });
+  setup();
+  await waitFor(() => expect(step(t("fs.step1"))).toHaveAttribute("data-state", "done"));
+  expect(step(t("fs.step1"))).toHaveTextContent(t("fs.tag.done"));
+  expect(step(t("fs.step2"))).toHaveTextContent(t("fs.tag.current"));
+  expect(step(t("fs.step2"))).toHaveTextContent(t("fs.step2.stuck"));
+  expect(step(t("fs.step3"))).toHaveTextContent(t("fs.tag.upcoming"));
+});
+
 test("ready: enabling saves the address, hides setup and shows the section", async () => {
   const user = userEvent.setup();
   ready();

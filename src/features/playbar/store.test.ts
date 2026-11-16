@@ -13,7 +13,8 @@ test("targetFromBar keeps Roblox links and UUID JobIds only", () => {
   expect(targetFromBar(bare, "", "any")?.privateLink).toBe(bare);
   const ps = "https://www.roblox.com/games/1818/x?privateServerLinkCode=99";
   expect(targetFromBar(ps, "", "any")).toMatchObject({ placeId: 1818, privateLink: ps });
-  const ro = "https://ro.blox.com/Ebh5?af_web_dp=https%3A%2F%2Fwww.roblox.com%2Fshare%3Fcode%3Dx";
+  const ro =
+    "https://ro.blox.com/Ebh5?af_web_dp=https%3A%2F%2Fwww.roblox.com%2Fshare%3Fcode%3Dx%26type%3DServer";
   expect(targetFromBar(ro, "", "any")?.privateLink).toBe(ro);
 
   expect(targetFromBar("https://evil.example/share?code=abc", "", "any")).toBeNull();
@@ -85,6 +86,21 @@ test("saving the last launch set never throws, even when storage refuses", () =>
   } finally {
     spy.mockRestore();
   }
+});
+
+test("links follow the Rust rules: games/start, locale, ro.blox.com, job links", () => {
+  expect(placeIdOf("https://www.roblox.com/games/start?placeId=77&launchData=x")).toBe(77);
+  expect(placeIdOf("https://www.roblox.com/pt-br/games/920587237/x")).toBe(920587237);
+  const af = "https://ro.blox.com/Ebh5?af_web_dp=https%3A%2F%2Fwww.roblox.com%2Fgames%2F5";
+  expect(placeIdOf(af)).toBe(5);
+  // public game redirect: a place target, not a private link
+  expect(targetFromBar(af, "", "any")).toEqual({ placeId: 5, jobId: null, privateLink: null });
+  expect(targetFromBar("https://ro.blox.com/Ebh5", "", "any")).toBeNull();
+  // game-instance link keeps its job whatever the mode
+  const job = `https://www.roblox.com/games/9/x?gameInstanceId=${uuid}`;
+  expect(targetFromBar(job, "", "any")).toEqual({ placeId: 9, jobId: uuid, privateLink: null });
+  // the same link in the server field is the JobId
+  expect(targetFromBar("9", job, "specific")?.jobId).toBe(uuid);
 });
 
 test("placeIdOf only trusts roblox.com links", () => {

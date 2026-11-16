@@ -197,15 +197,17 @@ function Capsule({ focusCancel }: { focusCancel: boolean }) {
         <span className="@max-[52rem]:hidden">{t("launch.progress", progress)}</span>
         <span className="hidden @max-[52rem]:inline">{t("launch.progressShort", progress)}</span>
       </span>
-      <button
-        type="button"
-        autoFocus={focusCancel}
-        aria-disabled={!!batch.cancel}
-        onClick={cancel}
-        className="h-7 shrink-0 rounded-full bg-accent-ink/12 px-3 text-13 font-semibold text-accent-ink transition-colors hover:bg-accent-ink/20 aria-disabled:opacity-50"
-      >
-        {t("launch.cancel")}
-      </button>
+      {!batch.reserve && (
+        <button
+          type="button"
+          autoFocus={focusCancel}
+          aria-disabled={!!batch.cancel}
+          onClick={cancel}
+          className="h-7 shrink-0 rounded-full bg-accent-ink/12 px-3 text-13 font-semibold text-accent-ink transition-colors hover:bg-accent-ink/20 aria-disabled:opacity-50"
+        >
+          {t("launch.cancel")}
+        </button>
+      )}
     </motion.span>
   );
 }

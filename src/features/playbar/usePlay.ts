@@ -10,6 +10,7 @@ import {
   codeText,
   errMessage,
   FAVORITES_CHANGED,
+  inTauri,
   LAUNCH_DONE,
   LAUNCH_PROGRESS,
   onEvent,
@@ -37,6 +38,8 @@ export type Batch = {
   done: LaunchDone | null;
   /** Cancel pressed before launch_start returned the id: cancelled as soon as it does. */
   cancel?: boolean;
+  /** A reserve-and-join in flight: nothing to cancel until its real batch arrives. */
+  reserve?: boolean;
 };
 
 type LaunchStore = {
@@ -101,6 +104,16 @@ function settle() {
   }, SETTLE_MS);
 }
 
+/** Clears the starting placeholder (`id` null) for these ids the way settle clears a batch,
+ * whatever happened to the object meanwhile (a cancel replaces it). */
+export function clearPlaceholder(ids: string[]) {
+  useLaunch.setState((s) => {
+    if (!s.batch || s.batch.id || s.batch.ids !== ids) return {};
+    const next = { ...s, batch: null, ...prune({ ...s, batch: null }) };
+    return { ...next, ...adopt(next) };
+  });
+}
+
 type PlayOpts = {
   /** Use the Play bar for every account, ignoring saved launch targets (also implied by a
    * non-empty bar destination). */
@@ -115,8 +128,12 @@ type PlayOpts = {
 };
 type Play = (ids: string[], opts?: PlayOpts) => void;
 
-/** True while a batch is on the Play button (one at a time, whatever the entry point). */
-export const launchBusy = () => !!useLaunch.getState().batch;
+/** True while a batch is on the Play button (one at a time, whatever the entry point). A batch
+ * that is done and only showing its check no longer counts; the next play replaces it. */
+export const launchBusy = () => {
+  const b = useLaunch.getState().batch;
+  return !!b && !b.done;
+};
 
 /** A server pick without a destination makes Rust skip the home-screen path: drop it. */
 export const barOf = (destination: string, server: string, mode: LaunchMode) => {
@@ -170,11 +187,7 @@ const play: Play = (ids, opts) => {
       settle();
     },
     (e) => {
-      useLaunch.setState((s) => {
-        if (!isMine(s.batch)) return {};
-        const next = { ...s, batch: null, ...prune({ ...s, batch: null }) };
-        return { ...next, ...adopt(next) };
-      });
+      clearPlaceholder(ids);
       toast(errMessage(e));
     },
   );
@@ -185,7 +198,7 @@ const cancelId = (batchId: string) =>
 
 const cancel = () => {
   const b = useLaunch.getState().batch;
-  if (!b || b.done) return;
+  if (!b || b.done || b.reserve) return;
   if (b.id) void cancelId(b.id);
   else useLaunch.setState({ batch: { ...b, cancel: true } });
 };
@@ -227,7 +240,7 @@ export function useLaunchEvents() {
     });
     const offD = onEvent<LaunchDone>(LAUNCH_DONE, (d) => {
       void qc.invalidateQueries({ queryKey: ["recents"] });
-      void qc.invalidateQueries({ queryKey: KEY });
+      // accounts refetch comes from accounts://changed (launch_one), which waits for saves in flight
       ended.add(d.batchId);
       useLaunch.setState((s) => {
         const next = { ...s, dones: { ...s.dones, [d.batchId]: d } };
@@ -269,7 +282,11 @@ export function useLaunchEvents() {
       const sel = useUi.getState().sel.ids;
       const live = new Set(qc.getQueryData<AccountsList>(KEY)?.accounts.map((a) => a.id));
       const ids = sel.length ? sel : lastLaunchSet().filter((id) => live.has(id));
-      if (!ids.length) return void toast(t("play.noneSelected"));
+      if (!ids.length) {
+        // The window may be hidden in the tray: ask the shell to show it so the toast is seen.
+        if (inTauri) void import("@tauri-apps/api/event").then(({ emit }) => emit("tray://show"));
+        return void toast(t("play.noneSelected"));
+      }
       play(ids, { here: true, dest: String(p.placeId) });
     });
     return () => {

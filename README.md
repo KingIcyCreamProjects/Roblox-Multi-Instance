@@ -16,7 +16,7 @@ All downloads are on [GitHub Releases][latest], under Assets.
 
 ### Windows
 
-Grab the `x64-setup.exe` installer (for example `Roblox.Multi.Instance_1.0.0_x64-setup.exe`) from the [latest release][latest] and run it. It installs for your user only and doesn't ask for admin. An `.msi` is there too.
+Grab the `x64-setup.exe` installer (for example `Roblox.Multi.Instance_1.0.1_x64-setup.exe`) from the [latest release][latest] and run it. It installs for your user only and doesn't ask for admin. An `.msi` is there too.
 
 Or paste this into PowerShell. It first adds RMI's folder to Windows Security's exclusions (one admin prompt, [here's why](#windows-security-says-its-a-virus)), then downloads the newest installer from the latest release and starts it. Click No on the admin prompt to skip the exclusion; the install still runs.
 
@@ -105,7 +105,7 @@ Grid Arrange is two steps. You put the accounts in order once (main, alt 1, alt 
 
 - Windows is the best supported platform. macOS and Linux are newer and less tested (see [Download](#download) and the table below).
 - Multi-instance and auto-reconnect depend on how the Roblox client behaves today (its mutex and its log format). Roblox can change either.
-- Everything lives in `%APPDATA%\Roblox Multi Instance`, logs and backups included. Start RMI with `--portable` to keep it all in `data\` next to the exe instead.
+- Your data lives in `%APPDATA%\Roblox Multi Instance`, logs and backups included. The sign-in windows keep their browser profiles in the app cache folder, `%LOCALAPPDATA%\com.kingicycreamprojects.robloxmultiinstance`. Start RMI with `--portable` to keep it all in `data\` next to the exe instead.
 - Server regions come from ip-api.com over plain HTTP, because their free tier has no HTTPS. It's off on new installs; turn it on in Settings if you want regions.
 
 ## Platform support
@@ -134,12 +134,12 @@ Can this get an account banned? It can. Running several accounts and automating 
 The session cookie is the sensitive part, since whoever has it is that account. RMI treats cookies, saved passwords and the automation token as secrets.
 
 - One vault file, `vault.rmiv`, encrypted with XChaCha20-Poly1305 under a random 32-byte key.
-- In OS mode that key is wrapped with DPAPI on Windows, or a device key held in the OS keyring (Keychain, Secret Service) on macOS and Linux. In password mode it comes from Argon2id (256 MiB, 3 passes) and is then wrapped the same way on Windows, so a copied vault is useless on another machine. With `--portable` only the password protects it.
+- In OS mode that key is wrapped with DPAPI on Windows, or a device key held in the OS keyring (Keychain, Secret Service) on macOS and Linux. If the keyring refuses the device key, RMI saves it as a `device.key` file (owner-only permissions) in the data folder instead, and then only those file permissions protect an OS-mode vault. In password mode it comes from Argon2id (256 MiB, 3 passes) and is then wrapped the same way on Windows, so a copied vault is useless on another machine. With `--portable` only the password protects it.
 - Writes are atomic with rolling backups. Locking wipes the key from memory, on idle and, by default, on sleep or Windows lock.
 - Cookies only reach the UI through an explicit copy or reveal, and both ask you to re-authenticate. Logs are redacted. No telemetry.
 - Outbound traffic goes to Roblox, the sign-in captcha (`arkoselabs.com`, `funcaptcha.com`), GitHub (updates), ip-api.com and, for Devices, your own computers on your Tailscale network. Nothing else.
 - The automation servers bind to `127.0.0.1` unless you turn on LAN access, and always need the token.
-- The friend remote server binds to `127.0.0.1` only. Tailscale Funnel is what exposes it, only if you turn it on. Without logging in, only the login page loads. Logins are limited to 10 failures per address per minute, and the friend password and token are stored encrypted with the OS secret store. "New password" signs the friend out everywhere.
+- The friend remote server binds to `127.0.0.1` only. Tailscale Funnel is what exposes it, only if you turn it on. Without logging in, only the login page loads. Logins are limited to 10 failures per address per minute, and the friend password and token are stored encrypted with DPAPI (Windows) or a device key held in the OS keyring (macOS, Linux; a `device.key` file in the data folder if the keyring refuses it). "New password" signs the friend out everywhere.
 - Remote access listens only on this computer's Tailscale address (100.64.0.0/10), never on all interfaces and never through Funnel or the friend server. It is off by default and only the local Settings page can switch it on. A paired computer holds a random token; this computer keeps only its SHA-256. One session at a time, every session is logged, and closing the "being controlled" bar ends it.
 
 ## Build from source
@@ -162,8 +162,8 @@ Checks: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and in `src-tauri/` `cargo f
 Pushing a `v` tag runs `.github/workflows/release.yml`, which builds the bundles, makes a draft release and uploads `latest.json` for the updater. Review the draft, then publish it. You can also start it from the Actions tab.
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 The tag has to match `version` in `src-tauri/tauri.conf.json` (`0.2.1-rc.1` for `v0.2.1-rc.1`) or the run stops.

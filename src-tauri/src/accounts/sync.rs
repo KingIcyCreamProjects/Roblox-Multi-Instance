@@ -6,7 +6,7 @@ use super::{map_presence, now_iso, session_of, set_session, SessionState};
 use crate::commands::{guard, Gen};
 use crate::roblox::{
     api::{games, presence, thumbnails, users},
-    Secret,
+    RobloxClient, RobloxError, Secret,
 };
 use crate::AppState;
 use std::collections::HashSet;
@@ -83,11 +83,13 @@ async fn presence_tick(app: &AppHandle) {
             .accounts
             .iter()
             .filter(|a| a.session == SessionState::Ok)
-            .find_map(|a| p.secrets.get(&a.id).filter(|s| !s.cookie.is_empty()))
-            .map(|s| Secret::new(s.cookie.as_str()));
+            .find_map(|a| {
+                let s = p.secrets.get(&a.id).filter(|s| !s.cookie.is_empty())?;
+                Some((a.id.clone(), Secret::new(s.cookie.as_str())))
+            });
         (ids, cookie)
     });
-    let Some((ids, cookie)) = snap else { return };
+    let Some((ids, owner)) = snap else { return };
     if ids.is_empty() {
         return;
     }
@@ -97,7 +99,15 @@ async fn presence_tick(app: &AppHandle) {
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let pres = match presence::get(&st.roblox, &uids, cookie.as_ref()).await {
+    let (res, dead) = fetch_presence(&st.roblox, &uids, owner.as_ref().map(|(_, c)| c)).await;
+    if let (true, Some((id, c))) = (dead, &owner) {
+        match super::cmds::expire_session(&st, id, c) {
+            Ok(true) => emit_changed(app),
+            Ok(false) => {}
+            Err(e) => log::debug!("session state not saved: {e}"),
+        }
+    }
+    let pres = match res {
         Ok(p) => p,
         Err(e) => {
             log::debug!("presence: {e}");
@@ -135,6 +145,19 @@ async fn presence_tick(app: &AppHandle) {
     }
     if changed {
         emit_changed(app);
+    }
+}
+
+/// Presence with `cookie`; if Roblox rejects that cookie (401), fall back to public presence so
+/// one dead session can't freeze presence for every account. `true` = the cookie is dead.
+async fn fetch_presence(
+    c: &RobloxClient,
+    uids: &[u64],
+    cookie: Option<&Secret>,
+) -> (crate::roblox::Result<Vec<presence::Presence>>, bool) {
+    match presence::get(c, uids, cookie).await {
+        Err(RobloxError::Unauthorized) => (presence::get(c, uids, None).await, true),
+        r => (r, false),
     }
 }
 
@@ -184,7 +207,7 @@ async fn game_names(
 /// On every unlock, then every `session.validateIntervalMin`.
 async fn validate_loop(app: AppHandle) {
     let mut last_gen = None;
-    let mut next = Instant::now();
+    let mut last_run = Instant::now();
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let st = app.state::<AppState>();
@@ -192,11 +215,9 @@ async fn validate_loop(app: AppHandle) {
         if !unlocked(&st) {
             continue;
         }
-        if g != last_gen || Instant::now() >= next {
-            let mins = setting(&app, "/session/validateIntervalMin")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(30)
-                .max(5);
+        // read every tick, so a changed interval applies at once (as in presence_loop)
+        let mins = setting(&app, "/session/validateIntervalMin").and_then(|v| v.as_u64());
+        if g != last_gen || validate_due(last_run, mins) {
             // only a pass that actually ran resets the schedule (busy or locked: retry in 5 s)
             let ran = match Flight::claim(&app) {
                 Some(f) => validate(&app, None, f).await,
@@ -204,11 +225,17 @@ async fn validate_loop(app: AppHandle) {
             };
             if ran {
                 last_gen = g;
-                next = Instant::now() + Duration::from_secs(mins * 60);
+                last_run = Instant::now();
                 headshots(&app).await;
             }
         }
     }
+}
+
+/// Whether `session.validateIntervalMin` (default 30, at least 5) has passed since `last_run`.
+fn validate_due(last_run: Instant, mins: Option<u64>) -> bool {
+    let mins = mins.unwrap_or(30).max(5);
+    last_run.elapsed() >= Duration::from_secs(mins.saturating_mul(60))
 }
 
 /// Single flight for validation: claimed before a pass is started (so a caller knows at once
@@ -325,13 +352,32 @@ pub(crate) fn apply_checks(
         if !same {
             continue; // cookie replaced (re-sign-in, paste) while we were checking
         }
-        dirty |= set_session(p, &c.id, c.session, None);
+        // A cookie that signs in as someone else (mis-paired import) is no good session for
+        // this account: it needs a sign-in. The cookie itself is kept, and the row keeps its name.
+        let saved_uid = p
+            .accounts
+            .iter()
+            .find(|a| a.id == c.id)
+            .and_then(|a| a.user_id);
+        let other = match (&c.user, saved_uid) {
+            (Some(u), Some(x)) if u.id != x => {
+                log::warn!("session check: the cookie of account {x} belongs to another user");
+                true
+            }
+            _ => false,
+        };
+        let session = if other {
+            SessionState::Expired
+        } else {
+            c.session
+        };
+        dirty |= set_session(p, &c.id, session, None);
         let Some(a) = p.accounts.iter_mut().find(|a| a.id == c.id) else {
             continue;
         };
         a.last_validated_at = Some(now.to_owned());
         dirty = true; // saved too, or the next unlock forgets the check
-        if let Some(u) = c.user {
+        if let Some(u) = c.user.filter(|_| !other) {
             if a.username != u.name || a.display_name != u.display_name {
                 a.username = u.name;
                 a.display_name = u.display_name;
@@ -502,6 +548,77 @@ mod tests {
         p.secrets.clear();
         assert!(apply_checks(&mut p, vec![], "t3"));
         assert_eq!(p.accounts[0].session, SessionState::Expired);
+    }
+
+    #[test]
+    fn cookie_of_another_user_needs_sign_in() {
+        use super::{apply_checks, Checked};
+        use crate::accounts::{upsert, Identity};
+        use zeroize::Zeroizing;
+        let mut p = crate::vault::model::VaultPayload::default();
+        let who = Identity {
+            user_id: 1,
+            username: "a".into(),
+            display_name: "A".into(),
+        };
+        let (_, id) = upsert(&mut p, &who, Some(Zeroizing::new("c".into())), None);
+        let check = || Checked {
+            id: id.clone(),
+            cookie: Secret::new("c"),
+            session: SessionState::Ok,
+            user: Some(users::AuthUser {
+                id: 2,
+                name: "b".into(),
+                display_name: "B".into(),
+            }),
+        };
+        assert!(apply_checks(&mut p, vec![check()], "t"));
+        assert_eq!(p.accounts[0].session, SessionState::Expired);
+        assert_eq!(p.accounts[0].username, "a"); // not renamed to the other user
+        assert_eq!(p.secrets[&id].cookie.as_str(), "c"); // cookie kept
+                                                         // no stored userId: nothing to compare, the check is trusted as before
+        p.accounts[0].user_id = None;
+        assert!(apply_checks(&mut p, vec![check()], "t2"));
+        assert_eq!(p.accounts[0].session, SessionState::Ok);
+        assert_eq!(p.accounts[0].username, "b");
+    }
+
+    #[test]
+    fn shorter_validate_interval_applies_at_once() {
+        use super::validate_due;
+        use std::time::{Duration, Instant};
+        let Some(ten_min_ago) = Instant::now().checked_sub(Duration::from_secs(600)) else {
+            return; // clock started less than 10 min ago (fresh boot)
+        };
+        assert!(validate_due(ten_min_ago, Some(5)));
+        assert!(!validate_due(ten_min_ago, Some(60)));
+        assert!(!validate_due(ten_min_ago, None)); // default 30
+        assert!(validate_due(ten_min_ago, Some(0))); // floor of 5
+    }
+
+    #[tokio::test]
+    async fn dead_presence_cookie_falls_back_to_public() {
+        use axum::routing::post;
+        async fn pres(h: HeaderMap) -> axum::response::Response {
+            match h.get("cookie").and_then(|v| v.to_str().ok()) {
+                Some(c) if c != ".ROBLOSECURITY=good" => StatusCode::UNAUTHORIZED.into_response(),
+                _ => axum::Json(serde_json::json!({"userPresences": [
+                    {"userId": 1, "userPresenceType": 1}
+                ]}))
+                .into_response(),
+            }
+        }
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let app = Router::new().route("/v1/presence/users", post(pres));
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = RobloxClient::new(BaseUrls::all(&url));
+        let (r, dead) = super::fetch_presence(&c, &[1], Some(&Secret::new("stale"))).await;
+        assert!(dead);
+        assert_eq!(r.unwrap()[0].user_id, 1);
+        let (r, dead) = super::fetch_presence(&c, &[1], Some(&Secret::new("good"))).await;
+        assert!(!dead);
+        assert_eq!(r.unwrap().len(), 1);
     }
 
     #[tokio::test]

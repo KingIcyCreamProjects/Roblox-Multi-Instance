@@ -18,7 +18,7 @@ fn payload() -> Vec<u8> {
             }
         },
         { "SecurityToken": "_|WARNING:-test-2", "Username": "Bob", "UserID": "7", "Group": "Alts",
-          "LastUse": "5/6/2024 7:08:09 PM", "Fields": { "Window_X": "1" }, "Unknown": 1 },
+          "LastUse": "5/6/2024 7:08:09 PM", "Fields": { "Window_X": "1", "SavedJobId": "job-2" }, "Unknown": 1 },
         { "no": "username" }
     ])
     .to_string()
@@ -115,6 +115,7 @@ fn plain_mapping() {
     assert_eq!(b.user_id, Some(7));
     assert_eq!(b.group, "Alts");
     assert_eq!(b.window_rect, None, "partial window set ignored");
+    assert_eq!(b.launch_target, None, "job id without a place is no target");
     assert_eq!(b.last_launched_at.as_deref(), Some("2024-05-06T19:08:09Z"));
 }
 

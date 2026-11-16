@@ -18,6 +18,31 @@ test("start minimized is a general switch", () => {
   expect(general.find((i) => i.path === "launch.startMinimized")?.kind).toBe("bool");
 });
 
+test("settings that do nothing on Linux are gated off there", () => {
+  const items = SECTIONS.flatMap((s) => s.items);
+  const cap = (p: string) => items.find((i) => i.path === p)?.cap;
+  // Linux reports windowRect and clientHelpers false: no window setup, no Roblox settings file.
+  expect(cap("launch.startMinimized")).toBe("windowRect");
+  for (const p of ["fps.unlock", "fps.value", "graphics.set", "graphics.level"])
+    expect(cap(p), p).toBe("clientHelpers");
+  // Nothing ever read it, on any OS.
+  expect(items.some((i) => i.path === "client.bootstrapperPassthrough")).toBe(false);
+});
+
+test("rows only some OSes can act on carry the matching capability and dependency", () => {
+  const items = SECTIONS.flatMap((s) => s.items);
+  const it = (p: string) => items.find((i) => i.path === p)!;
+  expect(it("watcher.waitForGame")).toMatchObject({ cap: "fullscreenWait" });
+  expect(it("watcher.waitForGame").dep).toContain("watcher.reconnect");
+  expect(it("remote.audio").cap).toBe("audio");
+  for (const p of ["watcher.closeWrongTitle", "watcher.expectedTitle", "watcher.saveWindowRects"])
+    expect(it(p).cap, p).toBe("windowRect");
+  // the client helpers and the control section only run while Automation is on
+  for (const p of ["clients.maxInstances", "clients.closeAfterMin", "ws.port", "net.allowLan"])
+    expect(it(p).dep, p).toContain("automation.enabled");
+  expect(it("friend.username").max).toBe(32);
+});
+
 test("every section is shown in exactly one group", () => {
   const ids = SECTIONS.map((s) => s.id).filter((id) => id !== "homelab"); // hidden for now
   const grouped = GROUPS.flatMap((g) => g.subs);
@@ -39,6 +64,8 @@ test("catalog ranges are sane and enum/cap fields are set where needed", () => {
     "windowRect",
     "watcher",
     "clientHelpers",
+    "fullscreenWait",
+    "audio",
   ]);
   for (const it of SECTIONS.flatMap((s) => s.items)) {
     if (it.kind === "num" || it.kind === "port") {

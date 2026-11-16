@@ -42,10 +42,14 @@ async fn post_wiped<T: serde::de::DeserializeOwned>(
     r
 }
 
-/// New code + private key. No auth needed.
+/// New code + private key. No auth needed. The key is masked in logs from here on; the
+/// 6-character code is shown on screen anyway, and masking it would garble log lines.
 pub async fn create(c: &RobloxClient) -> Result<Created> {
-    c.post_json("apis", &format!("{BASE}/create"), &json!({}), None)
-        .await
+    let n: Created = c
+        .post_json("apis", &format!("{BASE}/create"), &json!({}), None)
+        .await?;
+    crate::logging::register_secret(&n.private_key);
+    Ok(n)
 }
 
 pub async fn status(c: &RobloxClient, code: &str, key: &Secret) -> Result<Status> {
@@ -156,6 +160,7 @@ mod tests {
             n.expiration_time.as_deref(),
             Some("2030-01-01T00:00:00.000Z")
         );
+        assert_eq!(crate::logging::redact("key pk-1"), "key [REDACTED]");
         let key = Secret::new("pk-1");
         let s = status(&c, "ABC123", &key).await.unwrap();
         assert_eq!(

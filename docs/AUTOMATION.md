@@ -31,7 +31,11 @@ settings (`ws.port`, `api.port`).
   is no unauthenticated mode, not even for 404s.
 - **The token stays the same across restarts.** It is made once when you turn
   Automation on, then saved in the data folder encrypted by the OS (DPAPI on
-  Windows, the keyring elsewhere). It is never written to disk in plain text.
+  Windows, a device key elsewhere). It is never written to disk in plain text.
+  On macOS and Linux the device key lives in the OS keyring; if the keyring
+  refuses it, it is saved as a `device.key` file in the data folder instead
+  (owner-only permissions), so then anyone who can read the data folder can
+  decrypt the token.
   Regenerating it from Settings disconnects every script and invalidates the
   old token. If the saved token does not decode (for example after moving the
   data folder to another PC or user), RMI makes a new one and shows a toast. If
@@ -271,8 +275,10 @@ Every error has this shape:
 | 403 | `family_disabled` | that API family is off in Settings |
 | 403 | `forbidden_origin` | request carried a browser `Origin` header |
 | 403 | `forbidden_host` | LAN is off and the `Host` header is not loopback |
-| 404 | `not_found` | no such endpoint, account or launch |
+| 403 | `loopback_only` | a secret (cookie) was asked for from another computer over LAN; secrets are only served to `127.0.0.1` |
+| 404 | `not_found` | no such endpoint, account or launch, or the account has no cookie saved |
 | 409 | `session_expired` | the account's Roblox session expired; sign in again in RMI |
+| 409 | `friend_paused` | launch refused: a friend disconnected this account through the friend remote; reconnect it first |
 | 423 | `vault_locked` | unlock the vault in RMI first |
 | 405 | `method_not_allowed` | known path, wrong method |
 | 408 | `timeout` | the request took longer than 30 s |

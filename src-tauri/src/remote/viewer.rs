@@ -121,7 +121,11 @@ fn load_keys(st: &AppState) -> Result<Keys, String> {
 /// those tokens are lost anyway, so the file is set aside as `.bad` and pairing starts
 /// fresh instead of failing forever (and never dropping other devices on the next save).
 fn decode_keys(path: &std::path::Path, plain: Result<zeroize::Zeroizing<Vec<u8>>, String>) -> Keys {
-    match plain.and_then(|p| serde_json::from_slice::<Keys>(&p).map_err(|e| e.to_string())) {
+    // never the serde text: it can quote a token ("invalid type: string \"<token>\"")
+    let parse = |p: zeroize::Zeroizing<Vec<u8>>| {
+        serde_json::from_slice::<Keys>(&p).map_err(|_| "not valid device keys".to_owned())
+    };
+    match plain.and_then(parse) {
         Ok(keys) => {
             for k in keys.values() {
                 crate::logging::register_secret(&k.token);
@@ -141,6 +145,76 @@ fn decode_keys(path: &std::path::Path, plain: Result<zeroize::Zeroizing<Vec<u8>>
             Keys::new()
         }
     }
+}
+
+/// The keys as last decrypted, with the file's modified time: `push_running` runs every few
+/// seconds and must not ask the OS secret store each time. Blocking on a changed file.
+/// ponytail: keys that could not be read count as none until the file changes or the app
+/// restarts (no asking the secret store again every round); pairing reads them afresh.
+fn cached_keys(st: &AppState) -> Keys {
+    static CACHE: std::sync::Mutex<Option<(std::time::SystemTime, Keys)>> =
+        std::sync::Mutex::new(None);
+    let Ok(at) = std::fs::metadata(keys_path(st)).and_then(|m| m.modified()) else {
+        return Keys::new(); // no file: paired with nobody
+    };
+    let mut c = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, keys)) = c.as_ref().filter(|(t, _)| *t == at) {
+        return keys.clone();
+    }
+    let keys = load_keys(st).unwrap_or_default();
+    *c = Some((at, keys.clone()));
+    keys
+}
+
+/// Tell every computer this one is paired with which Roblox accounts (user ids) have a client
+/// here, so that computer's friend page can name this one. Sent only to computers the owner
+/// paired this one with; a locked vault sends nothing.
+/// ponytail: one small POST per paired computer every `PUSH_EVERY`, changed or not; send on
+/// change only if that ever shows up as load.
+pub async fn push_running(app: &tauri::AppHandle) {
+    let found = blocking(app, |st| {
+        // The vault first (a cheap lock): a locked app never asks the OS secret store.
+        let accs: Vec<(u64, String)> = {
+            let g = st
+                .vault
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(v) = g.as_ref() else {
+                return Ok(None);
+            };
+            let all = v.payload().accounts.iter();
+            all.filter_map(|a| Some((a.user_id?, a.tracker_id.clone())))
+                .collect()
+        };
+        let keys = cached_keys(st);
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        let trackers: Vec<String> = accs.iter().map(|a| a.1.clone()).collect();
+        let live = st.platform.tracked_clients(&trackers);
+        let ids: Vec<u64> = accs
+            .iter()
+            .filter(|(_, t)| live.iter().any(|(_, l)| l == t))
+            .map(|(u, _)| *u)
+            .collect();
+        let body = json!({ "name": st.remote.device_name(), "userIds": ids });
+        Ok(Some((keys, body, st.remote.port())))
+    })
+    .await;
+    let (Ok(Some((keys, body, port))), Ok(c)) = (found, client()) else {
+        return;
+    };
+    // All at once: computers that are off must not delay the report to the ones that are on.
+    // An older RMI (404), a computer that is off or no longer paired: try again next time.
+    let sends = keys.iter().map(|(ip, k)| {
+        c.post(format!("http://{ip}:{port}/v1/remote/running"))
+            .bearer_auth(&k.token)
+            .json(&body)
+            .send()
+    });
+    futures_util::future::join_all(sends).await;
 }
 
 /// Blocking.

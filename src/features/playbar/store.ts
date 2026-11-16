@@ -21,10 +21,11 @@ export const usePlayBar = create<PlayBarState>((set) => ({
   setMode: (mode) => set({ mode }),
 }));
 
-/** Place id from a bare id or a roblox.com/games/<id> link; null otherwise. */
+/** Place id from a bare id or a Roblox game link (same rules as Rust `parse_link`: optional
+ * locale, /games/start?placeId=N, ro.blox.com af_web_dp); null otherwise. */
 export function placeIdOf(s: string): number | null {
-  const m = s.trim().match(/^(\d+)$|^(?:https?:\/\/)?(?:[\w-]+\.)?roblox\.com\/games\/(\d+)/i);
-  return m ? Number(m[1] ?? m[2]) : null;
+  const d = s.trim();
+  return /^\d+$/.test(d) ? Number(d) : (parseLink(d)?.placeId ?? null);
 }
 
 const LAST_SET = "rmi.lastLaunchSet";
@@ -55,30 +56,60 @@ export function targetFromBar(
   mode: LaunchMode,
 ): LaunchTarget | null {
   const d = destination.trim();
+  const link = parseLink(d);
   const placeId = placeIdOf(d);
-  const privateLink = isPrivateLink(d) ? d : null;
+  const privateLink = link?.priv ? d : null;
   if (!placeId && !privateLink) return null;
-  const s = server.trim();
+  // a job link in the server field counts as its JobId (Rust `parse_server`)
+  const s = parseLink(server.trim())?.jobId ?? server.trim();
   if (mode === "specific" && placeId && s && !UUID.test(s)) return null; // typo'd JobId
-  const jobId = mode === "specific" && placeId && s ? s : null;
-  if (placeId && !privateLink && (mode === "random" || mode === "smallest"))
+  // a game-instance destination link names its server; Rust launches it whatever the mode
+  const jobId = privateLink
+    ? null
+    : (link?.jobId ?? (mode === "specific" && placeId && s ? s : null));
+  if (placeId && !privateLink && !jobId && (mode === "random" || mode === "smallest"))
     return { placeId, jobId, privateLink, mode };
   return { placeId, jobId, privateLink };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LOCALE = /^([a-z]{2}|[a-z]{2}-[a-z]{2})$/;
 
-/** Private-server or share link on a Roblox host (Rust `parse_link` rule), scheme optional. */
-function isPrivateLink(d: string): boolean {
+type Link = { placeId: number | null; jobId: string | null; priv: boolean };
+
+/** Roblox link, scheme optional: Rust `parse_link` rules. `priv` = private-server or share link.
+ * Null when it is not a Roblox game or share link. */
+function parseLink(d: string, depth = 0): Link | null {
   let u: URL;
   try {
     u = new URL(/^[a-z]+:\/\//i.test(d) ? d : `https://${d}`);
   } catch {
-    return false;
+    return null;
   }
   const h = u.hostname.toLowerCase();
-  if (!/^https?:$/.test(u.protocol)) return false;
-  if (h === "ro.blox.com") return true;
-  if (h !== "roblox.com" && !h.endsWith(".roblox.com")) return false;
-  return u.searchParams.has("privateServerLinkCode") || /\/share(-links)?$/.test(u.pathname);
+  if (!/^https?:$/.test(u.protocol)) return null;
+  if (h !== "ro.blox.com" && h !== "roblox.com" && !h.endsWith(".roblox.com")) return null;
+  const q = (k: string) => u.searchParams.get(k) || null;
+  // ro.blox.com redirect links carry the real target in af_web_dp (depth 1 only)
+  const dp = q("af_web_dp");
+  if (h === "ro.blox.com" && depth === 0 && dp) return parseLink(dp, 1);
+  let segs = u.pathname.split("/").slice(1);
+  if (LOCALE.test(segs[0]) && ["games", "share", "share-links"].includes(segs[1]))
+    segs = segs.slice(1);
+  if (segs[0] === "games") {
+    const place = segs[1] === "start" ? q("placeId") : segs[1];
+    const placeId = /^\d+$/.test(place ?? "") ? Number(place) : 0;
+    if (!placeId) return null;
+    const jobId = q("gameInstanceId");
+    return {
+      placeId,
+      jobId: jobId && UUID.test(jobId) ? jobId : null,
+      priv: !!q("privateServerLinkCode"),
+    };
+  }
+  if (segs[0] === "share" || segs[0] === "share-links") {
+    const ok = q("code") && ["Server", "ExperienceInvite"].includes(q("type") ?? "");
+    return ok ? { placeId: null, jobId: null, priv: true } : null;
+  }
+  return null;
 }

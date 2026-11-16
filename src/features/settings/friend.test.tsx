@@ -9,7 +9,7 @@ import * as ipc from "@/lib/ipc";
 import type { AccountsList } from "@/lib/ipc";
 import { mockCall, resetAccountsMock, seedAccount } from "@/lib/mock";
 import { useDraft } from "./draft";
-import { FriendExtras } from "./FriendSection";
+import { FriendExtras, inviteText, ownerNameClash } from "./FriendSection";
 
 // jsdom has no layout; give the virtual list a viewport.
 beforeAll(() => {
@@ -159,4 +159,49 @@ test("select all allows every account, clear all takes it back", async () => {
   await waitFor(async () => expect((await all()).every((a) => a.friendAllowed)).toBe(true));
   await user.click(await screen.findByRole("button", { name: t("friend.none") }));
   await waitFor(async () => expect((await all()).some((a) => a.friendAllowed)).toBe(false));
+});
+
+test("invite holds the link and username, never a password", async () => {
+  const user = userEvent.setup();
+  const write = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  await mockCall("settings_set", {
+    patch: { friend: { publicUrl: "https://rmi.example.ts.net", username: "pal" } },
+  });
+  wrap(<FriendExtras />);
+  const btn = screen.getByRole("button", { name: t("friend.invite") });
+  await waitFor(() => expect(btn).toBeEnabled());
+  await user.click(btn);
+  await waitFor(() => expect(write).toHaveBeenCalled());
+  const text = write.mock.calls[0]![0];
+  expect(text).toBe(inviteText("https://rmi.example.ts.net", "pal"));
+  expect(text).toContain("https://rmi.example.ts.net");
+  expect(text).toContain("pal");
+  for (const k of ["friend_password", "friend_owner_password"] as const)
+    expect(text).not.toContain((await mockCall(k)) as string);
+  expect(await screen.findByText(t("friend.inviteCopied"))).toBeInTheDocument();
+});
+
+test("owner password row shows only when an owner name is saved", async () => {
+  const user = userEvent.setup();
+  const calls = vi.spyOn(ipc, "call");
+  const { unmount } = wrap(<FriendExtras />);
+  await screen.findByRole("button", { name: t("friend.copyPw") });
+  expect(screen.queryByRole("button", { name: t("friend.copyOwnerPw") })).toBeNull();
+  unmount();
+  await mockCall("settings_set", { patch: { friend: { ownerUsername: "boss" } } });
+  wrap(<FriendExtras />);
+  const copy = await screen.findByRole("button", { name: t("friend.copyOwnerPw") });
+  expect(screen.getByText("boss")).toBeInTheDocument();
+  await user.click(copy);
+  await waitFor(() => expect(calls).toHaveBeenCalledWith("friend_owner_password_copy"));
+  expect(await screen.findByText(t("friend.ownerPwCopied"))).toBeInTheDocument();
+  calls.mockRestore();
+});
+
+test("owner name must differ from the friend name, ignoring case and spaces", () => {
+  expect(ownerNameClash("Friend", "friend")).toBe(true);
+  expect(ownerNameClash(" pal ", "PAL")).toBe(true);
+  expect(ownerNameClash("", "friend")).toBe(false);
+  expect(ownerNameClash("  ", "")).toBe(false);
+  expect(ownerNameClash("boss", "friend")).toBe(false);
 });

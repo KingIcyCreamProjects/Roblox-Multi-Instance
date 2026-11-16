@@ -22,6 +22,10 @@ pub struct Capabilities {
     pub window_rect: bool,
     pub watcher: bool,
     pub client_helpers: bool,
+    /// Fullscreen detection works (the watcher reconnect hold needs it).
+    pub fullscreen_wait: bool,
+    /// Remote access can capture and send sound.
+    pub audio: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

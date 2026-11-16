@@ -73,6 +73,10 @@
   const CHUNK = 256 * 1024, AHEAD = 4 * 1024 * 1024, GB = 1024 * 1024 * 1024, MAX_FILE = 4 * GB, BLOB_MAX = GB;
   const TOO_BIG = 'Too large for this browser. Use a desktop Chromium browser.';
   const OVER_4G = 'Too large. The limit is 4 GB per file.';
+  // the Tauri macOS webview cancels link downloads unless the app registers a download handler,
+  // so the Blob fallback below would save nothing there
+  const NO_SAVE = !!window.__TAURI_INTERNALS__ && /Mac/.test(navigator.platform || navigator.userAgent);
+  const CANT_SAVE = 'This app cannot save downloads on a Mac yet.';
   const fmtB = n => (n = Math.max(0, n || 0), n < 1024 ? Math.round(n) + ' B' : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB' : n < GB ? (n / 1048576).toFixed(1) + ' MB' : (n / GB).toFixed(2) + ' GB');
   // sound (cap "audio"): worklet that plays posted Float32 chunks, starts after about 100 ms is buffered, drops past 300 ms
   const WORKLET = `registerProcessor('rv-pcm',class extends AudioWorkletProcessor{
@@ -924,6 +928,7 @@ if(i<len)this.on=false;return true}})`;
       if (!filesOk()) return;
       const size = num(e.size) || 0, path = join(fsPath, e.name);
       if (size > MAX_FILE) return xfer('down', e.name, size, OVER_4G);
+      if (NO_SAVE && !window.showSaveFilePicker) return xfer('down', e.name, size, CANT_SAVE);
       let w = null;
       if (window.showSaveFilePicker) {
         try { w = await (await window.showSaveFilePicker({ suggestedName: e.name })).createWritable(); }
@@ -1545,6 +1550,8 @@ if(i<len)this.on=false;return true}})`;
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('blur', releaseAll);
       if (fsEl() === root) toggleFull();
+      // onFs is gone: release the fullscreen key lock here
+      try { if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock(); } catch {}
       if (ws) { ws.onclose = ws.onmessage = null; try { ws.close(1000); } catch {} }
       root.remove();
     }

@@ -181,6 +181,7 @@ pub async fn start(
         app.clone(),
         label,
         dir,
+        hint,
         account_id,
         password,
         start_gen,
@@ -189,10 +190,12 @@ pub async fn start(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // one spawn site; a params struct is not worth it
 async fn poll(
     app: AppHandle,
     label: String,
     dir: PathBuf,
+    hint: Option<String>,
     account_id: Option<String>,
     password: Option<Zeroizing<String>>,
     start_gen: Gen,
@@ -223,7 +226,16 @@ async fn poll(
         };
         if let Some(c) = found {
             let pw = password.clone();
-            match finish(&app, c, account_id.as_deref(), pw, start_gen).await {
+            match finish(
+                &app,
+                c,
+                hint.as_deref(),
+                account_id.as_deref(),
+                pw,
+                start_gen,
+            )
+            .await
+            {
                 // Roblox unreachable: keep the signed-in window and retry, no full re-login
                 Ok(None) => {
                     let _ = w.set_title("Sign in to Roblox — can't reach Roblox, retrying…");
@@ -258,10 +270,18 @@ async fn poll(
     remove_dir_retry(&dir).await;
 }
 
+/// An empty hint matches anyone; otherwise the signed-in username must equal it (case-insensitive).
+fn hint_matches(hint: Option<&str>, username: &str) -> bool {
+    hint.map(str::trim)
+        .filter(|h| !h.is_empty())
+        .is_none_or(|h| h.eq_ignore_ascii_case(username))
+}
+
 /// `Ok(None)`: a transient Roblox failure; the caller retries with the window still open.
 async fn finish(
     app: &AppHandle,
     cookie: Zeroizing<String>,
+    hint: Option<&str>,
     account_id: Option<&str>,
     password: Option<Zeroizing<String>>,
     start_gen: Gen,
@@ -281,6 +301,8 @@ async fn finish(
         username: u.name,
         display_name: u.display_name,
     };
+    // A password typed for the hinted name is not stored for a different user who signed in.
+    let password = password.filter(|_| hint_matches(hint, &who.username));
     mutate(&st, start_gen, |p| {
         signin_upsert(p, account_id, &who, cookie, password)
     })?;
@@ -373,6 +395,14 @@ mod tests {
         assert_eq!(title(Some(" alt_1 ")), "Sign in to Roblox — alt_1");
         assert_eq!(title(Some("  ")), "Sign in to Roblox");
         assert_eq!(title(None), "Sign in to Roblox");
+    }
+
+    #[test]
+    fn password_kept_only_for_the_hinted_user() {
+        assert!(hint_matches(None, "Alt_1"));
+        assert!(hint_matches(Some("  "), "Alt_1"));
+        assert!(hint_matches(Some(" alt_1 "), "Alt_1"));
+        assert!(!hint_matches(Some("alt_2"), "Alt_1"));
     }
 
     #[test]

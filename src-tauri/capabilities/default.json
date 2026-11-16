@@ -113,6 +113,8 @@
     "allow-friend-link",
     "allow-friend-password",
     "allow-friend-password-copy",
+    "allow-friend-owner-password",
+    "allow-friend-owner-password-copy",
     "allow-friend-new-password",
     "allow-friend-ts-status",
     "allow-friend-ts-enable",

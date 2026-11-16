@@ -30,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 const PAGE: &str = "servers://page";
 const FIND: &str = "servers://find";
+/// Stream key only (nothing is emitted): a newer region load of a window cancels its older one.
+const REGIONS: &str = "servers://regions";
 /// 100 pages = 10k rows, the table's cap.
 const MAX_PAGES: u32 = 100;
 const HEAD: &str = "150x150";
@@ -623,6 +625,7 @@ async fn regions_for(
 #[tauri::command]
 pub async fn servers_regions(
     app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, AppState>,
     place_id: u64,
     job_ids: Vec<String>,
@@ -637,8 +640,11 @@ pub async fn servers_regions(
     let fmt = fmt.as_str().unwrap_or("{city}, {countryCode}");
     let gen = Gen::now(&state.lock_gen);
     let cookie = cookie_of(&state, &account_id)?;
-    let live = || gen.current(&state.lock_gen) && guard(&state.vault).is_some();
+    let (sid, token) = cookie_stream(&state, Some(gen), window.label(), REGIONS)?;
+    let live =
+        || !token.is_cancelled() && gen.current(&state.lock_gen) && guard(&state.vault).is_some();
     let r = regions_for(&state.roblox, place_id, job_ids, &cookie, tpl, fmt, live).await;
+    close_stream(&sid);
     if r.is_err() {
         session_dead(&app, &account_id, &cookie); // regions_for fails only on a 401
     }
@@ -726,23 +732,30 @@ fn tile(h: games::Hit) -> Tile {
     }
 }
 
-/// Thumbnails + icons; image failures leave them null.
-async fn decorate(c: &RobloxClient, tiles: &mut [Tile]) {
+/// How long tiles whose images failed to load stay cached, so a retry fetches them again soon.
+const BROKEN_TTL: Duration = Duration::from_secs(30);
+
+/// Thumbnails + icons; image failures leave them null. `false` if any lookup failed.
+async fn decorate(c: &RobloxClient, tiles: &mut [Tile]) -> bool {
+    let mut ok = true;
     let mut ids: Vec<u64> = tiles.iter().map(|t| t.universe_id).collect();
     ids.sort_unstable();
     ids.dedup();
     let thumbs = thumbnails::game_thumbs(c, &ids).await.unwrap_or_else(|e| {
         log::debug!("game thumbnails: {e}");
+        ok = false;
         HashMap::new()
     });
     let icons = thumbnails::game_icons(c, &ids).await.unwrap_or_else(|e| {
         log::debug!("game icons: {e}");
+        ok = false;
         HashMap::new()
     });
     for t in tiles {
         t.thumbnail = thumbs.get(&t.universe_id).cloned();
         t.icon = icons.get(&t.universe_id).cloned();
     }
+    ok
 }
 
 async fn list_cached(
@@ -755,9 +768,14 @@ async fn list_cached(
     }
     let (hits, next) = f.await.map_err(err_text)?;
     let mut tiles: Vec<Tile> = hits.into_iter().map(tile).collect();
-    decorate(c, &mut tiles).await;
+    let ok = decorate(c, &mut tiles).await;
     let next = next.filter(|_| !tiles.is_empty());
-    store(&LISTS, key, (tiles.clone(), next.clone()), TTL);
+    store(
+        &LISTS,
+        key,
+        (tiles.clone(), next.clone()),
+        if ok { TTL } else { BROKEN_TTL },
+    );
     Ok((tiles, next))
 }
 
@@ -850,10 +868,15 @@ async fn details(c: &RobloxClient, place_ids: &[u64]) -> CmdResult<Vec<Tile>> {
             })
             .collect();
         let mut only: Vec<Tile> = tiles.iter().map(|t| t.1.clone()).collect();
-        decorate(c, &mut only).await;
+        let ok = decorate(c, &mut only).await;
         for ((p, t), d) in tiles.iter_mut().zip(only) {
             *t = d;
-            store(&TILES, p.to_string(), t.clone(), TTL);
+            store(
+                &TILES,
+                p.to_string(),
+                t.clone(),
+                if ok { TTL } else { BROKEN_TTL },
+            );
         }
     }
     Ok(place_ids
@@ -958,7 +981,79 @@ fn clean_link(l: Option<&str>) -> CmdResult<Option<String>> {
 
 #[tauri::command]
 pub async fn favorites_list(app: AppHandle) -> CmdResult<Vec<Favorite>> {
-    on_library(&app, favorites::list).await
+    let list = on_library(&app, favorites::list).await?;
+    fill_thumbnails(&app, &list);
+    Ok(list)
+}
+
+/// When each favorite's image was last looked up: a failed lookup caches nothing, so without
+/// this every `favorites_list` would ask Roblox again for every favorite without an image.
+static THUMB_TRIED: LazyLock<Mutex<HashMap<u64, std::time::Instant>>> =
+    LazyLock::new(Default::default);
+
+/// The places not looked up in the last `BROKEN_TTL`; they are marked as tried now.
+fn due(
+    tried: &mut HashMap<u64, std::time::Instant>,
+    places: Vec<u64>,
+    now: std::time::Instant,
+) -> Vec<u64> {
+    tried.retain(|_, t| now < *t + BROKEN_TTL);
+    places
+        .into_iter()
+        .filter(|p| {
+            let new = !tried.contains_key(p);
+            if new {
+                tried.insert(*p, now);
+            }
+            new
+        })
+        .collect()
+}
+
+/// Favorites are saved without an image (adding must not wait on Roblox). Fetch missing ones
+/// in the background, save them, and tell the UI.
+fn fill_thumbnails(app: &AppHandle, list: &[Favorite]) {
+    let mut places: Vec<u64> = list
+        .iter()
+        .filter(|f| f.thumbnail.is_none())
+        .map(|f| f.place_id)
+        .collect();
+    places.sort_unstable();
+    places.dedup();
+    let now = std::time::Instant::now();
+    let places = due(
+        &mut THUMB_TRIED.lock().unwrap_or_else(PoisonError::into_inner),
+        places,
+        now,
+    );
+    if places.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let c: Arc<RobloxClient> = app.state::<AppState>().roblox.clone();
+        if let Err(e) = details(&c, &places).await {
+            log::debug!("favorite thumbnails: {e}");
+            return;
+        }
+        let found: HashMap<u64, String> = places
+            .iter()
+            .filter_map(|p| {
+                let t = cached(&TILES, &p.to_string())?;
+                Some((*p, t.thumbnail.or(t.icon)?))
+            })
+            .collect();
+        if found.is_empty() {
+            return;
+        }
+        match on_library(&app, move |p| favorites::fill_thumbnails(p, &found)).await {
+            Ok(n) if n > 0 => {
+                let _ = app.emit("favorites://changed", Value::Null);
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("favorite thumbnails: {e}"),
+        }
+    });
 }
 
 #[tauri::command]
@@ -970,18 +1065,12 @@ pub async fn favorites_add(
 ) -> CmdResult<Favorite> {
     let name = clean_name(&name)?;
     let private_link = clean_link(private_link.as_deref())?;
-    let c: Arc<RobloxClient> = app.state::<AppState>().roblox.clone();
-    let thumbnail = details(&c, &[place_id])
-        .await
-        .ok()
-        .and_then(|t| t.into_iter().next())
-        .and_then(|t| t.thumbnail.or(t.icon));
     let f = Favorite {
         id: crate::accounts::new_id(),
         place_id,
         name,
         private_link,
-        thumbnail,
+        thumbnail: None, // filled in the background by favorites_list
         order: 0,
     };
     on_library(&app, move |p| favorites::add(p, f)).await
@@ -1039,6 +1128,15 @@ mod tests {
             label: l.into(),
             country_code: cc.map(Into::into),
         })
+    }
+
+    #[test]
+    fn favorite_images_are_not_looked_up_again_until_broken_ttl() {
+        let mut tried = HashMap::new();
+        let t0 = std::time::Instant::now();
+        assert_eq!(due(&mut tried, vec![1, 2], t0), vec![1, 2]);
+        assert_eq!(due(&mut tried, vec![1, 2, 3], t0 + BROKEN_TTL / 2), vec![3]);
+        assert_eq!(due(&mut tried, vec![1, 2, 3], t0 + BROKEN_TTL), vec![1, 2]);
     }
 
     #[test]
@@ -1541,6 +1639,17 @@ mod tests {
         let g = got.lock().unwrap().clone();
         assert_eq!(g.len(), 1);
         assert!(g[0].done && g[0].found.is_none() && g[0].error.is_some());
+    }
+
+    #[tokio::test]
+    async fn decorate_reports_failed_image_lookups() {
+        let c = crate::roblox::mock(Router::new()).await; // every image route 404s
+        let mut tiles = vec![tile(games::Hit {
+            universe_id: 1,
+            ..Default::default()
+        })];
+        assert!(!decorate(&c, &mut tiles).await);
+        assert!(tiles[0].thumbnail.is_none());
     }
 
     #[tokio::test]

@@ -124,8 +124,11 @@ function useRelaunch(a: AutomationAccount) {
     (settings?.relaunch as { defaultDelaySec?: number } | undefined)?.defaultDelaySec ?? 60,
   );
   const enabled = a.relaunch?.enabled === true;
-  const seconds = typeof a.relaunch?.seconds === "number" ? a.relaunch.seconds : fallback;
-  const set = (on: boolean, delaySec: number) => {
+  // `stored` stays undefined until the user sets a delay, so the account keeps following the
+  // Settings default instead of pinning today's value
+  const stored = typeof a.relaunch?.seconds === "number" ? a.relaunch.seconds : undefined;
+  const seconds = stored ?? fallback;
+  const set = (on: boolean, delaySec?: number) => {
     const placeId = Number(a.relaunch?.placeId);
     const jobId = a.relaunch?.jobId;
     // Optimistic, so a second click before the refetch toggles from the new value; the
@@ -146,12 +149,12 @@ function useRelaunch(a: AutomationAccount) {
       .catch(reportError)
       .finally(() => void qc.invalidateQueries({ queryKey: ["snap"] }));
   };
-  return { enabled, seconds, set };
+  return { enabled, seconds, stored, set };
 }
 
 /** Row end: relaunch engine status and the auto-relaunch switch. */
 export function RelaunchSwitch({ a }: { a: AutomationAccount }) {
-  const { enabled, seconds, set } = useRelaunch(a);
+  const { enabled, stored, set } = useRelaunch(a);
   const s = a.relaunchStatus;
   const id = `rl-${a.account}`;
   const text = s?.stopped
@@ -180,7 +183,7 @@ export function RelaunchSwitch({ a }: { a: AutomationAccount }) {
           checked={enabled}
           aria-label={t("auto.relaunch")}
           aria-describedby={id}
-          onChange={(e) => set(e.target.checked, seconds)}
+          onChange={(e) => set(e.target.checked, stored)}
         />
         <span
           aria-hidden

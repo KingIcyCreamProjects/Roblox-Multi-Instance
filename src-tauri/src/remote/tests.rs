@@ -213,6 +213,41 @@ fn auth(token: &str) -> String {
     json!({"t": "auth", "token": token}).to_string()
 }
 
+#[tokio::test]
+async fn running_report_only_from_a_paired_computer() {
+    let (_d, r, _f) = setup(true);
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let post = |token: Option<String>, body: Value| {
+        let mut q = reqwest::Client::new().post(format!("http://{addr}/v1/remote/running"));
+        if let Some(t) = token {
+            q = q.bearer_auth(t);
+        }
+        async move { q.json(&body).send().await.unwrap().status().as_u16() }
+    };
+    let body = json!({"name": " Mac ", "userIds": [7, 9]});
+    // No token, or one nobody paired with: refused, nothing stored.
+    assert_eq!(post(None, body.clone()).await, 403);
+    assert_eq!(post(Some(new_token()), body.clone()).await, 403);
+    assert!(r.running_elsewhere().is_empty());
+    assert_eq!(post(Some(token.clone()), body).await, 200);
+    let mut got = r.running_elsewhere();
+    got.sort();
+    assert_eq!(got, [(7, "Mac".to_owned()), (9, "Mac".to_owned())]);
+    // The next report replaces the last; without a name, the one it paired under.
+    let body = json!({"name": "", "userIds": [9]});
+    assert_eq!(post(Some(token.clone()), body).await, 200);
+    assert_eq!(r.running_elsewhere(), [(9, "Laptop".to_owned())]);
+    let many: Vec<u64> = (0..=MAX_RUNNING as u64).collect();
+    let body = json!({"name": "Mac", "userIds": many});
+    assert_eq!(post(Some(token), body).await, 400);
+    // Forgotten once no new report came for `PEER_TTL`.
+    for v in lock(&r.c.peers).values_mut() {
+        v.0 -= PEER_TTL;
+    }
+    assert!(r.running_elsewhere().is_empty());
+}
+
 /// The next `bye`, skipping other control messages.
 async fn bye_of(ws: &mut Ws) -> Value {
     loop {
@@ -1213,6 +1248,31 @@ fn upload_names_are_sanitised() {
     let s = safe_name(&long);
     assert_eq!(s.chars().count(), 150);
     assert!(s.ends_with("a.pdf"), "the extension survives: {s}");
+    // the cap is in bytes: 3-byte CJK and 4-byte emoji names still fit 255-byte file systems
+    for c in ["漢", "😀"] {
+        let s = safe_name(&format!("{}.pdf", c.repeat(100)));
+        assert!(s.len() <= 150 && s.len() > 140, "{} bytes", s.len());
+        assert!(
+            s.ends_with(&format!("{c}.pdf")),
+            "cut on a char boundary: {s}"
+        );
+    }
+}
+
+#[test]
+fn names_drop_bidi_and_zero_width_characters() {
+    assert_eq!(clean_name("  Den\u{7} PC  "), "Den PC");
+    assert_eq!(clean_name("evil\u{202e}gpj.exe"), "evilgpj.exe");
+    assert_eq!(
+        clean_name("\u{feff}a\u{200b}b\u{2066}c\u{2069}\u{200f}"),
+        "abc"
+    );
+    // ordinary letters of every script stay
+    assert_eq!(clean_name("Комп 東京 حاسوب"), "Комп 東京 حاسوب");
+    assert_eq!(clean_name("a\u{200e}b"), "ab");
+    // joiners stay: Persian words and joined emoji need them
+    assert_eq!(clean_name("می\u{200c}خواهم"), "می\u{200c}خواهم");
+    assert_eq!(clean_name("👩\u{200d}💻"), "👩\u{200d}💻");
 }
 
 #[test]
@@ -1246,9 +1306,26 @@ fn network_and_device_paths_are_refused() {
     assert!(files::local_abs(std::env::temp_dir().as_path()));
     assert!(!files::local_abs(Path::new("relative/x")));
     #[cfg(windows)]
-    for p in [r"\\host\share\x", r"\\?\UNC\host\share\x", r"\\.\pipe\x"] {
+    for p in [
+        r"\\host\share\x",
+        "//host/share/x",
+        r"\\?\UNC\host\share\x",
+        r"\\.\pipe\x",
+        r"\\.\C:\x",
+        r"\\?\GLOBALROOT\Device\Mup\host\share\x",
+        r"\\?\GLOBALROOT\Device\NamedPipe\x",
+        r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+        r"\??\UNC\host\share\x",
+        r"C:x",
+    ] {
         assert!(!files::local_abs(Path::new(p)), "{p}");
     }
+    #[cfg(windows)]
+    for p in [r"C:\Users\x", "C:/Users/x", r"\\?\C:\Users\x"] {
+        assert!(files::local_abs(Path::new(p)), "{p}");
+    }
+    #[cfg(not(windows))]
+    assert!(files::local_abs(Path::new("/home/x")));
 }
 
 #[test]
@@ -2080,6 +2157,7 @@ async fn h264_negotiated_and_keyframes_on_request() {
     // not offered (older viewers): JPEG
     send(&mut ws, json!({"t": "start", "screen": 0, "maxFps": 60})).await;
     assert_eq!(&next_frame(&mut ws, 3000).await.unwrap()[..2], &[0x01, 0]);
+    send(&mut ws, json!({"t": "ack"})).await;
     // offered: H.264 from the next picture on, starting with an IDR
     send(
         &mut ws,
@@ -2102,20 +2180,36 @@ async fn h264_negotiated_and_keyframes_on_request() {
     // a still screen: the last picture a few more times (sharpening it), then nothing...
     fake.same.store(true, SeqCst);
     fake.still.store(true, SeqCst);
+    // every wait stays under the session's 2 s idle limit (this fake viewer only acks, it
+    // never pings): a longer silence ends the session
     let mut n = 0;
-    while next_h264(&mut ws, 300).await.is_some() {
+    loop {
+        // the repeats after the last change are owed: a slow machine only delays them
+        let wait = if n < REFINE as usize { 1500 } else { 300 };
+        let Some(_) = next_h264(&mut ws, wait).await else {
+            break;
+        };
         n += 1;
         send(&mut ws, json!({"t": "ack"})).await;
+        // repeats that never stop would never leave a quiet gap
+        assert!(n <= 3 * REFINE as usize, "the repeats never stop");
     }
-    // at least the repeats after the last change (more may have been in flight); the loop
-    // ending shows they stop
+    // at least the repeats after the last change (more may have been in flight)
     assert!(n >= REFINE as usize, "{n}");
-    // ...until the viewer asks for a keyframe
+    // ...until the viewer asks for a keyframe; a repeat that came after the quiet gap (a
+    // slow machine) may still come first
     send(&mut ws, json!({"t": "idr"})).await;
-    let f = next_h264(&mut ws, 3000)
-        .await
-        .expect("a keyframe on request");
-    assert_eq!(f[2], 1);
+    let f = loop {
+        let f = next_h264(&mut ws, 1500)
+            .await
+            .expect("a keyframe on request");
+        if f[2] == 1 {
+            break f;
+        }
+        send(&mut ws, json!({"t": "ack"})).await;
+        n += 1;
+        assert!(n <= 3 * REFINE as usize, "no keyframe on request");
+    };
     assert!(nal_types(&f).contains(&7) && nal_types(&f).contains(&8));
     send(&mut ws, json!({"t": "ack"})).await;
     let stats = loop {

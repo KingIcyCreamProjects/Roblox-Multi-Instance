@@ -2,7 +2,7 @@
 
 use crate::launch::recents::{edit_key, read_key};
 use serde::{Deserialize, Serialize};
-use std::{io, path::Path};
+use std::{collections::HashMap, io, path::Path};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +84,20 @@ pub fn update(
     })?
 }
 
+/// Sets the image of favorites that have none, by placeId. Returns how many changed.
+pub fn fill_thumbnails(path: &Path, found: &HashMap<u64, String>) -> io::Result<usize> {
+    edit_key(path, KEY, |v: &mut Vec<Favorite>| {
+        let mut n = 0;
+        for f in v.iter_mut().filter(|f| f.thumbnail.is_none()) {
+            if let Some(t) = found.get(&f.place_id) {
+                f.thumbnail = Some(t.clone());
+                n += 1;
+            }
+        }
+        n
+    })
+}
+
 pub fn remove(path: &Path, id: &str) -> io::Result<()> {
     edit_key(path, KEY, |v: &mut Vec<Favorite>| v.retain(|f| f.id != id))
 }
@@ -117,6 +131,25 @@ mod tests {
     }
     fn ids(p: &Path) -> Vec<String> {
         list(p).unwrap().into_iter().map(|f| f.id).collect()
+    }
+
+    #[test]
+    fn fill_thumbnails_sets_only_missing_ones() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("library.json");
+        add(&p, fav("a", 1, None)).unwrap();
+        add(&p, fav("b", 2, None)).unwrap();
+        add(&p, fav("c", 3, None)).unwrap();
+        let mut have = fav("d", 4, None);
+        have.thumbnail = Some("keep".into());
+        add(&p, have).unwrap();
+        let found: HashMap<u64, String> = [(1, "u1"), (4, "new")]
+            .iter()
+            .map(|(k, v)| (*k, v.to_string()))
+            .collect();
+        assert_eq!(fill_thumbnails(&p, &found).unwrap(), 1);
+        let got: Vec<Option<String>> = list(&p).unwrap().into_iter().map(|f| f.thumbnail).collect();
+        assert_eq!(got, [Some("u1".into()), None, None, Some("keep".into())]);
     }
 
     #[test]

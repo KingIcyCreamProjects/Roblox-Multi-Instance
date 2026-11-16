@@ -431,6 +431,35 @@ impl Vault {
             .write(true)
             .create_new(true)
             .open(path)?;
+        // Backups left by an earlier vault whose file is gone: move them aside so this vault's
+        // pruning never deletes them (its new key can't restore them; they stay importable).
+        let old = backup_dir(path);
+        let has_old = fs::read_dir(&old).is_ok_and(|rd| {
+            rd.flatten()
+                .any(|e| parse_backup_name(&e.file_name().to_string_lossy()).is_some())
+        });
+        if has_old {
+            let stamp = chrono::Utc::now().format(BACKUP_FMT);
+            let aside = old.with_file_name(format!("backups-before-{stamp}"));
+            // A file held open inside (an antivirus scan, say) blocks the move for a moment on
+            // Windows: retry over about a second, then refuse rather than risk those backups.
+            let mut r = fs::rename(&old, &aside);
+            for _ in 0..5 {
+                if r.is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                r = fs::rename(&old, &aside);
+            }
+            if let Err(e) = r {
+                log::warn!("moving the old vault backups aside failed: {e}");
+                let _ = fs::remove_file(path);
+                return Err(VaultError::Refused(
+                    "A file in the backups folder is in use. Close it and try again.",
+                ));
+            }
+            log::warn!("old vault backups moved to {}", aside.display());
+        }
         let v = Vault {
             path: path.to_owned(),
             header,
@@ -829,6 +858,46 @@ mod tests {
         let e = Vault::create(&p, CreateMode::Os, os()).err().unwrap();
         assert!(matches!(e, VaultError::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists));
         assert_eq!(fs::read(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn create_moves_old_backups_aside() {
+        let (d, p) = tmp();
+        Vault::create(&p, CreateMode::Os, os()).unwrap();
+        let old = d.path().join("backups").join("vault-20260101-000000.rmiv");
+        fs::copy(&p, &old).unwrap();
+        fs::remove_file(&p).unwrap();
+        assert!(!Vault::exists(&p));
+        Vault::create(&p, CreateMode::Os, os()).unwrap();
+        assert!(!old.exists(), "never left where the new vault prunes");
+        let aside: Vec<_> = fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|q| q.to_string_lossy().contains("backups-before-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert!(aside[0].join("vault-20260101-000000.rmiv").is_file());
+    }
+
+    /// A backup held open: a clear refusal, the old backups untouched, no vault left.
+    #[cfg(windows)]
+    #[test]
+    fn create_refuses_clearly_when_old_backups_are_in_use() {
+        let (d, p) = tmp();
+        Vault::create(&p, CreateMode::Os, os()).unwrap();
+        let old = d.path().join("backups").join("vault-20260101-000000.rmiv");
+        fs::copy(&p, &old).unwrap();
+        fs::remove_file(&p).unwrap();
+        let held = fs::File::open(&old).unwrap();
+        let r = Vault::create(&p, CreateMode::Os, os());
+        assert!(
+            matches!(r, Err(VaultError::Refused(m)) if m.contains("in use")),
+            "{:?}",
+            r.err()
+        );
+        assert!(old.is_file() && !Vault::exists(&p));
+        drop(held);
     }
 
     #[test]

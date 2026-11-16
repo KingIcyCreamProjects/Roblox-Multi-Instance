@@ -281,6 +281,8 @@ pub fn run() {
             commands::friend_link,
             commands::friend_password,
             accounts::cmds::friend_password_copy,
+            commands::friend_owner_password,
+            accounts::cmds::friend_owner_password_copy,
             commands::friend_new_password,
             friend::tailscale::friend_ts_status,
             friend::tailscale::friend_ts_enable,
@@ -434,12 +436,7 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    for account in hub.next_changes().await {
-                        let payload = serde_json::json!({ "account": account });
-                        if let Err(e) = handle.emit("automation://changed", payload) {
-                            log::warn!("emit automation://changed failed: {e}");
-                        }
-                    }
+                    hub.next_changes().await;
                     // App-level sync (survives a lock / page unmount).
                     commands::state_changed(&handle, &["snap"]);
                 }
@@ -500,6 +497,15 @@ pub fn run() {
                 let r = remote.clone();
                 tauri::async_runtime::spawn(async move { r.sync().await });
             }
+            // Paired computers learn which accounts run here (their friend page names this one).
+            let h = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut tick = tokio::time::interval(remote::PUSH_EVERY);
+                loop {
+                    tick.tick().await;
+                    remote::viewer::push_running(&h).await;
+                }
+            });
             shell::init(app.handle());
             Ok(())
         })

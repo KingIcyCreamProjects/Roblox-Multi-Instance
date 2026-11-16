@@ -233,6 +233,8 @@ function Loaded({ list }: { list: AccountsList }) {
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key;
     const cursor = sel.cursor;
+    // a search hides rows; never delete or launch selected accounts the user can't see
+    const shown = searching ? sel.ids.filter((id) => order.includes(id)) : sel.ids;
     if (k === "ArrowDown" || k === "ArrowUp" || k === "Home" || k === "End") {
       e.preventDefault();
       const d = k === "ArrowDown" ? 1 : k === "ArrowUp" ? -1 : k === "End" ? Infinity : -Infinity;
@@ -242,11 +244,11 @@ function Loaded({ list }: { list: AccountsList }) {
       e.preventDefault();
       setSel(select(sel, order, cursor, "toggle"));
     } else if (k === "Enter") {
-      const ids = sel.ids.length ? sel.ids : cursor ? [cursor] : [];
+      const ids = shown.length ? shown : cursor && order.includes(cursor) ? [cursor] : [];
       if (ids.length) play(ids);
     } else if (k === "Delete" || (k === "Backspace" && e.metaKey)) {
       e.preventDefault();
-      void act.remove(sel.ids);
+      void act.remove(shown);
     } else if (k === "F2" && cursor) {
       e.preventDefault();
       setSel(select(sel, order, cursor, "replace"));

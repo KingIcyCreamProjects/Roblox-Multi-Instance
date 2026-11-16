@@ -4,7 +4,7 @@ use super::{
     is_game_client, is_player_log, log_settled,
     logparse::{LogRules, Srv},
     persist_rect, pick_log,
-    rules::{cooldown_open, decide, is_game_title, rejoin, Cfg, Rejoin, Snap},
+    rules::{cooldown_open, decide, is_game_title, keep_skipped, rejoin, Cfg, Rejoin, Snap},
     tracker_from_cmdline, AccountLookup, Action, ClientInfo, VaultLookup, PROCESS_NAME,
 };
 use std::collections::{HashMap, HashSet};
@@ -551,11 +551,12 @@ impl Scanner {
                     pid.as_u32(),
                     p.start_time() as i64,
                     // Windows: PagefileUsage = private bytes; working set shrinks when idle.
-                    // Linux: virtual size is address space (many GB); resident is the real use.
-                    if cfg!(target_os = "linux") {
-                        p.memory()
-                    } else {
+                    // Linux and macOS: virtual size is address space (many GB); resident is
+                    // the real use.
+                    if cfg!(windows) {
                         p.virtual_memory()
+                    } else {
+                        p.memory()
                     } / (1024 * 1024),
                     (
                         tracker_from_cmdline(&cmd),
@@ -619,9 +620,12 @@ impl Scanner {
                 .filter_map(|c| pick_log(&files, start_ms_or(c.0, c.1), &HashSet::new()))
                 .map(PathBuf::from)
                 .collect();
+            // Linux without pasta: every client runs on the user's own Sober profile (as
+            // `open_uri`), tracker or not.
+            let isolated = !cfg!(target_os = "linux") || st.platform.capabilities().multi_instance;
             let trackers: HashMap<(u32, i64), Option<&str>> = live
                 .iter()
-                .map(|c| ((c.0, c.1), c.3 .0.as_deref()))
+                .map(|c| ((c.0, c.1), c.3 .0.as_deref().filter(|_| isolated)))
                 .collect();
             // Oldest first, so a later client can't take an earlier one's log first.
             let mut order: Vec<_> = keys.iter().map(|k| (start_ms_or(k.0, k.1), *k)).collect();
@@ -678,7 +682,9 @@ impl Scanner {
             let Some(t) = self.tracks.get_mut(&(*pid, *started)) else {
                 continue;
             };
-            if t.account.is_none() && unlocked {
+            // Fresh each scan while unlocked: a renamed or deleted account must not act on a
+            // stale match.
+            if unlocked {
                 t.account = tracker.as_deref().and_then(|k| lookup.by_tracker(k));
             }
             // Locked vault: no names on screen, even cached ones.
@@ -790,12 +796,18 @@ impl Scanner {
                 match d {
                     Rejoin::Ignore => {}
                     // Locked: keep the reason so it reconnects once unlocked (field doc).
-                    // Other skips (rate limit) drop it, else it would repeat every scan.
-                    Rejoin::Skip(why) if !unlocked => {
-                        t.reason = Some(r);
-                        log::debug!("watcher: not reconnecting {name} yet: {why}");
+                    // Rate limit: keep it too (rechecked each scan, uncounted), so the client
+                    // reconnects once the hour frees up; see `keep_skipped`.
+                    Rejoin::Skip(why) => {
+                        if keep_skipped(r, unlocked) {
+                            t.reason = Some(r);
+                        }
+                        if reason.is_some() {
+                            log::info!("watcher: not reconnecting {name}: {why}");
+                        } else {
+                            log::debug!("watcher: not reconnecting {name} yet: {why}");
+                        }
                     }
-                    Rejoin::Skip(why) => log::info!("watcher: not reconnecting {name}: {why}"),
                     Rejoin::Go { .. } if !dest() => {
                         log::info!("watcher: not reconnecting {name}: no destination known");
                     }

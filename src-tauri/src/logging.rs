@@ -10,6 +10,20 @@ static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 static SECRETS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+/// The home folder holds the Windows user name; logs may be attached to bug reports.
+// ponytail: the plain and `{:?}`-escaped forms only (any case on Windows).
+static HOME: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    let h = dirs::home_dir()?.display().to_string();
+    (h.len() > 3).then(|| home_re(&h))
+});
+
+/// The home folder, only where its name ends: `/home/al` must not eat `/home/alex`. A
+/// non-word character after it (a separator, a quote, a space) or the end of the text.
+fn home_re(h: &str) -> Regex {
+    let ci = if cfg!(windows) { "(?i)" } else { "" };
+    let (esc, plain) = (regex::escape(&h.replace('\\', "\\\\")), regex::escape(h));
+    Regex::new(&format!(r"{ci}(?:{esc}|{plain})(\W|$)")).unwrap()
+}
 
 const MASK: &str = "[REDACTED]";
 
@@ -27,6 +41,9 @@ pub fn redact(input: &str) -> String {
     out = COOKIE.replace_all(&out, MASK).into_owned();
     for s in SECRETS.read().unwrap().iter() {
         out = out.replace(s.as_str(), MASK);
+    }
+    if let Some(h) = HOME.as_ref() {
+        out = h.replace_all(&out, "~$1").into_owned();
     }
     out
 }
@@ -122,6 +139,31 @@ mod tests {
             redact("token=tok_0123456789abcdef!"),
             format!("token={MASK}!")
         );
+    }
+
+    #[test]
+    fn masks_home_folder() {
+        let home = dirs::home_dir().unwrap();
+        let user = home.file_name().unwrap().to_string_lossy().into_owned();
+        let p = home.join("AppData").join("rmi.log");
+        for line in [format!("kept as {}", p.display()), format!("kept as {p:?}")] {
+            let r = redact(&line);
+            assert!(r.starts_with("kept as ") && r.contains('~'), "{r}");
+            assert!(!r.contains(&user), "{r}");
+        }
+        // Only where the name ends: a longer folder name is someone else's.
+        let re = home_re("/home/al");
+        let m = |s: &str| re.replace_all(s, "~$1").into_owned();
+        assert_eq!(m("/home/alex/x"), "/home/alex/x");
+        assert_eq!(m("in /home/al/x and /home/al"), "in ~/x and ~");
+        assert_eq!(m("\"/home/al\" ok"), "\"~\" ok");
+        if cfg!(windows) {
+            let re = home_re(r"C:\Users\Al");
+            let m = |s: &str| re.replace_all(s, "~$1").into_owned();
+            assert_eq!(m(r"c:\users\al\x"), r"~\x");
+            assert_eq!(m(r#""C:\\USERS\\AL\\x""#), r#""~\\x""#);
+            assert_eq!(m(r"C:\Users\Alex\x"), r"C:\Users\Alex\x");
+        }
     }
 
     #[test]

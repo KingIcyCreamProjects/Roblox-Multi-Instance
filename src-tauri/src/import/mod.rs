@@ -289,7 +289,8 @@ fn map_account(v: &Value) -> Option<ImportedAccount> {
         .unwrap_or_default();
     let place = f.remove("SavedPlaceId").and_then(|x| x.parse().ok());
     let job = f.remove("SavedJobId").filter(|x| !x.is_empty());
-    if place.is_some() || job.is_some() {
+    // a job id alone is no target: launch ignores it, so don't show it as an override
+    if place.is_some() {
         a.launch_target = Some(LaunchTarget {
             place_id: place,
             job_id: job,

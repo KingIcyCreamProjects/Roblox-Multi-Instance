@@ -46,26 +46,35 @@ pub fn write_fps(version_dir: &Path, fps: Option<u32>, custom: Option<&Value>) -
     };
     cur.remove(FPS_FLAG);
     // Keys merged from the custom file last time go first, so a flag removed from it (or
-    // the whole file cleared) leaves Roblox's file too.
+    // the whole file cleared) leaves Roblox's file too, or gets back the user's own value
+    // it overwrote. Stored as key -> that value (null: there was none); older versions
+    // stored a plain key list.
     let keys_path = dir.join(MERGED_KEYS);
-    let prev: Vec<String> = match std::fs::read(&keys_path)
+    let prev: Map<String, Value> = match std::fs::read(&keys_path)
         .map_err(|_| ())
         .and_then(|b| serde_json::from_slice(&b).map_err(|_| ()))
     {
+        Ok(Value::Object(p)) => p,
         Ok(Value::Array(p)) => p
             .iter()
             .filter_map(Value::as_str)
-            .map(str::to_owned)
+            .map(|k| (k.to_owned(), Value::Null))
             .collect(),
-        _ => vec![],
+        _ => Map::new(),
     };
-    for k in &prev {
-        cur.remove(k);
+    for (k, v) in &prev {
+        match v {
+            Value::Null => cur.remove(k),
+            v => cur.insert(k.clone(), v.clone()),
+        };
     }
-    let mut merged = vec![];
+    let mut merged = Map::new();
     match custom {
         Some(Value::Object(c)) => {
-            merged = c.keys().cloned().collect();
+            merged = c
+                .keys()
+                .map(|k| (k.clone(), cur.get(k).cloned().unwrap_or(Value::Null)))
+                .collect();
             cur.extend(c.clone());
         }
         Some(_) => log::warn!("custom client settings are not a JSON object; ignored"),
@@ -80,10 +89,11 @@ pub fn write_fps(version_dir: &Path, fps: Option<u32>, custom: Option<&Value>) -
     }
     std::fs::create_dir_all(&dir)?;
     crate::settings::save(&path, &Value::Object(cur))?;
-    crate::settings::save(&keys_path, &Value::from(merged))
+    crate::settings::save(&keys_path, &Value::Object(merged))
 }
 
-/// Next to `ClientAppSettings.json`: the custom keys RMI merged last.
+/// Next to `ClientAppSettings.json`: the custom keys RMI merged last, each with the value
+/// it replaced.
 const MERGED_KEYS: &str = "RMIMergedKeys.json";
 
 #[cfg(test)]
@@ -157,6 +167,24 @@ mod tests {
         assert_eq!(read(d.path()), json!({ "Keep": 1, "Bar": 2 }));
         write_fps(d.path(), None, None).unwrap();
         assert_eq!(read(d.path()), json!({ "Keep": 1 }));
+    }
+
+    #[test]
+    fn users_own_value_comes_back_when_custom_drops_the_key() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(file(d.path()).parent().unwrap()).unwrap();
+        std::fs::write(file(d.path()), r#"{"X":true}"#).unwrap();
+        write_fps(d.path(), None, Some(&json!({ "X": false }))).unwrap();
+        write_fps(d.path(), None, Some(&json!({ "X": 2 }))).unwrap();
+        assert_eq!(read(d.path()), json!({ "X": 2 }));
+        write_fps(d.path(), None, None).unwrap();
+        assert_eq!(read(d.path()), json!({ "X": true }));
+        // the old key-list format still removes what it merged
+        let keys = d.path().join("ClientSettings").join(MERGED_KEYS);
+        write_fps(d.path(), None, Some(&json!({ "Y": 1 }))).unwrap();
+        std::fs::write(&keys, r#"["Y"]"#).unwrap();
+        write_fps(d.path(), None, None).unwrap();
+        assert_eq!(read(d.path()), json!({ "X": true }));
     }
 
     #[test]

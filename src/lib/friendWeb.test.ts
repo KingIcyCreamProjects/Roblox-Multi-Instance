@@ -8,8 +8,10 @@ const loginError = new Function(`${noReach}\n${fnSrc}; return loginError;`)() as
 ) => string;
 
 test("login errors: wrong creds, rate limit, offline", () => {
-  expect(loginError(401)).toBe("Wrong username or password");
-  expect(loginError(429)).toBe("Too many tries. Wait a minute.");
+  expect(loginError(401)).toBe(
+    "Wrong username or password. Check them, or ask the owner for a new password.",
+  );
+  expect(loginError(429)).toBe("Too many tries. Wait 1 minute, then try again.");
   expect(loginError(0)).toBe("Can't reach the owner's computer.");
   expect(loginError(502)).toBe("Can't reach the owner's computer."); // the tunnel: RMI is not running
   expect(loginError(500)).toBe("Something went wrong");

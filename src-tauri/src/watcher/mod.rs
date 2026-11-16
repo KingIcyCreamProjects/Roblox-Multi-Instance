@@ -461,7 +461,7 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
             let st = app.state::<crate::AppState>();
             let s = lock(&st.settings);
             let b = |p| s.pointer(p) == Some(&serde_json::Value::Bool(true));
-            b("/watcher/waitForGame") && b("/watcher/reconnect")
+            b("/watcher/waitForGame") && b("/watcher/reconnect") && b("/watcher/enabled")
         };
         on && other_app_front().is_some_and(|(h, _)| win::fullscreen(h))
     };
@@ -484,10 +484,12 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     let st = app.state::<crate::AppState>();
-    let on = lock(&st.settings)
-        .pointer("/watcher/reconnect")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    // Turned off during the wait (the watcher itself too: its stop does not end this task).
+    let on = {
+        let s = lock(&st.settings);
+        let b = |p| s.pointer(p) == Some(&serde_json::Value::Bool(true));
+        b("/watcher/enabled") && b("/watcher/reconnect")
+    };
     if !on {
         return false;
     }

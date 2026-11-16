@@ -153,6 +153,8 @@ pub fn parse_server(input: &str) -> Option<ServerTarget> {
             place_id,
             link_code,
         }),
+        // a game-instance link names a server too
+        Destination::Job { job_id, .. } => Some(ServerTarget::JobId(job_id)),
         _ => None,
     }
 }
@@ -458,5 +460,15 @@ mod tests {
             None
         );
         assert_eq!(parse_server("roblox.com/games/5/x"), None);
+    }
+
+    #[test]
+    fn server_field_takes_a_job_link() {
+        assert_eq!(
+            parse_server(&format!(
+                "https://www.roblox.com/games/5/x?gameInstanceId={JOB}"
+            )),
+            Some(ServerTarget::JobId(JOB.into()))
+        );
     }
 }

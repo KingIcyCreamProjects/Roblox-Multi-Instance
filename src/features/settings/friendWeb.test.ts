@@ -9,8 +9,12 @@ type Acc = {
   status: string;
   game: string | null;
   uptimeSec: number | null;
+  elsewhere?: boolean;
+  computer?: string;
 };
 let acc: Acc;
+/** more accounts listed after `acc` */
+let more: Acc[];
 let posts: { path: string; body: string; signal?: AbortSignal | null }[];
 let postError: string | null;
 /** set: /v1/accounts answers this instead of the list */
@@ -27,6 +31,7 @@ function boot(status: string, uptimeSec: number | null, token = true) {
   vi.clearAllTimers();
   acc = { id: "a1", displayName: "Alt", username: "alt", status, game: null, uptimeSec };
   posts = [];
+  more = [];
   document.body.innerHTML = indexHtml.slice(
     indexHtml.indexOf("<body>") + 6,
     indexHtml.indexOf("</body>"),
@@ -61,7 +66,7 @@ function boot(status: string, uptimeSec: number | null, token = true) {
         ? new Response(JSON.stringify({ error: { code: postError } }), { status: 409 })
         : json({});
     }
-    if (path === "/v1/accounts") return listError ? listError.clone() : json([acc]);
+    if (path === "/v1/accounts") return listError ? listError.clone() : json([acc, ...more]);
     // avatar. Not a real Response: reading a Blob body needs real I/O ticks on Node 22,
     // which the fake timers never run, so the image would not mount in time.
     return { ok: true, status: 200, blob: async () => new Blob(["png"]) } as unknown as Response;
@@ -386,4 +391,95 @@ test("a second poll loop is not started by a tap during a poll", async () => {
   document.dispatchEvent(new Event("visibilitychange"));
   await wait(20_000);
   expect(polls).toBeLessThanOrEqual(6); // one loop at 5 s (two pokes + 4 ticks), not three
+});
+
+const text = (sel: string) => document.querySelector(sel)?.textContent;
+
+test("a live row names this computer; no name, no label", async () => {
+  boot("inGame", 60);
+  acc.computer = "Office PC";
+  await wait(5100);
+  expect(text(".comp")).toBe("Office PC");
+  expect(document.querySelector<HTMLElement>(".comp")!.hidden).toBe(false);
+  expect(document.querySelector(".comp svg")!.getAttribute("aria-hidden")).toBe("true");
+  delete acc.computer;
+  await wait(5100);
+  expect(document.querySelector<HTMLElement>(".comp")!.hidden).toBe(true);
+});
+
+test("an elsewhere row says On <computer> or On another computer, with its own pill", async () => {
+  boot("inGame", null);
+  acc.elsewhere = true;
+  acc.computer = "MacBook Air";
+  await wait(5100);
+  expect(text(".comp")).toBe("On MacBook Air");
+  expect(text(".pill")).toBe("Other computer");
+  expect(document.querySelector<HTMLElement>(".pill")!.dataset.s).toBe("elsewhere");
+  expect(btn().textContent).toBe("Reconnect"); // nothing here to disconnect
+  delete acc.computer;
+  await wait(5100);
+  expect(text(".comp")).toBe("On another computer");
+});
+
+test("paused and elsewhere reads as the other computer", async () => {
+  boot("paused", null);
+  acc.elsewhere = true;
+  await wait(5100);
+  expect(text(".pill")).toBe("Other computer");
+});
+
+test("starting is live: its own pill and detail, Disconnect stays", async () => {
+  boot("starting", null);
+  await wait(5100);
+  expect(text(".pill")).toBe("Starting");
+  expect(text(".detail")).toContain("Starting Roblox");
+  expect(btn().textContent).toBe("Disconnect");
+});
+
+test("offline says Not running here", async () => {
+  boot("offline", null);
+  await wait(5100);
+  expect(text(".detail")).toContain("Not running here");
+});
+
+test("summary line counts buckets and leaves zeros out", async () => {
+  boot("inGame", 60);
+  const mk = (id: string, status: string, elsewhere = false): Acc => ({
+    id,
+    displayName: id,
+    username: id,
+    status,
+    game: null,
+    uptimeSec: null,
+    elsewhere,
+  });
+  more = [mk("b", "inGame"), mk("c", "inGame", true), mk("d", "paused", true), mk("e", "offline")];
+  await wait(5100);
+  expect(text("#summary")).toBe("2 in game · 2 on another computer · 1 not running");
+  expect(document.getElementById("summary")!.hidden).toBe(false);
+});
+
+test("summary is hidden when the list is empty", async () => {
+  boot("inGame", 60);
+  vi.stubGlobal("fetch", async () => json([]));
+  await wait(5100);
+  expect(document.getElementById("summary")!.hidden).toBe(true);
+});
+
+test("Reconnect on an elsewhere row asks first; Cancel sends nothing, Start here sends", async () => {
+  boot("offline", null);
+  acc.elsewhere = true;
+  acc.computer = "MacBook Air";
+  await wait(5100);
+  btn().click();
+  expect(sheet().open).toBe(true);
+  expect(text("#sheet-title")).toBe("This account is running on MacBook Air. Start it here too?");
+  sheet().close("no");
+  await wait(10);
+  expect(posts).toEqual([]);
+  await wait(500);
+  btn().click();
+  sheet().close("yes");
+  await wait(10);
+  expect(posts.map((p) => p.path)).toEqual(["/v1/accounts/a1/reconnect"]);
 });

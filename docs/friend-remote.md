@@ -2,17 +2,21 @@
 
 Friend remote gives one friend a web page where they can disconnect and reconnect the Roblox accounts you choose, from any browser. They need nothing installed. Nothing else on your PC is reachable through it.
 
-You need your own free Tailscale account. RMI uses Tailscale Funnel to put a private-looking web address on the internet that points at a small server inside RMI.
+You need a free Tailscale account and about 2 minutes. Your friend installs nothing. RMI uses Tailscale Funnel to put a web address on the internet that points at a small server inside RMI.
 
 ## Set it up
 
-Open Settings, Friend remote. Until a link exists, RMI shows three steps with live status.
+Open Settings, Friend remote. Until a link exists, RMI shows three steps. Each step is tagged "Done", "Needs you" or "Waiting", and it updates by itself every few seconds.
 
-1. **Install Tailscale.** The button opens the download page at tailscale.com. This step is done when RMI finds the Tailscale command line tool.
-2. **Sign in to Tailscale.** Open Tailscale from the system tray (Windows) or the menu bar (macOS) and sign in. A free account works. This step is done when Tailscale reports it is running.
-3. **Turn on friend link.** RMI runs Tailscale for you and saves the address it gets.
+1. **Install Tailscale.** Click "Download Tailscale" (it opens https://tailscale.com/download), run the installer and finish it. This step is done when RMI finds the Tailscale command line tool.
+2. **Sign in to Tailscale.** A free account works. This step is done when Tailscale reports it is running.
+   - Windows: click the Tailscale icon in the system tray near the clock (it may hide behind the ^ arrow), choose Log in, and sign in.
+   - macOS: click the Tailscale icon in the menu bar, choose Log in, and sign in.
+   - Linux: run `sudo tailscale up` in a terminal and open the link it prints.
+   - Still waiting? Open Tailscale and check that it says Connected.
+3. **Turn on friend link.** Click "Turn on friend link". RMI runs Tailscale for you and saves the address it gets. If it fails, RMI shows Tailscale's message. Click the button again, or use "I have my own address".
 
-If Tailscale needs your OK to share a link (Funnel or HTTPS is switched off for your account), RMI shows "Allow Funnel for your Tailscale account". Click "Open Tailscale page", follow the link Tailscale gives, allow it, then come back and press "Try again". You only do this once per account.
+If Tailscale needs your OK to share a link (Funnel or HTTPS is switched off for your account), RMI shows "Allow Funnel for your Tailscale account". Click "Open Tailscale page", approve it there, then come back and click "Try again". RMI opens the link Tailscale gives it. You only do this once per account.
 
 If you already have your own HTTPS address that points at RMI, click "I have my own address" and enter it by hand.
 
@@ -24,17 +28,32 @@ The friend can do two things: Disconnect and Reconnect. They cannot see cookies 
 
 ## Give your friend access
 
-Send three things:
+Once the link exists, Settings, Friend remote shows "What to send your friend": the link, the username and the password, each with its own "Copy" button.
 
-- the link shown in Settings (for example `https://rmi.example.ts.net`)
-- the friend username (default `friend`, not case sensitive; you can change it)
-- the password RMI generated (20 characters, shown and copyable in Settings)
+- Link, for example `https://rmi.example.ts.net`. Send it exactly as shown.
+- Username. Default `friend`, not case sensitive. You can change it in the "Friend username" field.
+- Password. RMI generated it (20 characters). Click the eye to show it.
 
-Send the password somewhere private. The friend opens the link, logs in, and sees the accounts you allowed.
+Two buttons help:
+
+- **Copy invite** copies a ready message with the link and the username. It tells your friend the password comes separately. The password is never in it.
+- **Open the page** opens the link in your browser, so you see what your friend sees.
+
+Send the invite first, then the password in a separate message. The friend opens the link, logs in, and sees the accounts you allowed.
 
 ### New password
 
 "New password" makes a fresh password and signs every browser out at once. Use it if the password leaked, or when you stop trusting a device. Send the new password to your friend.
+
+## Your own login
+
+You can add a second login for yourself, for example to check on your accounts from your phone. It sees every account, not only the ones you shared, and which computer each one runs on.
+
+1. In Settings, Friend remote, type a name in "Your own login" (1 to 32 characters). It must differ from the friend username, or RMI shows an error and does not save it.
+2. Click Save. A password line appears: click the eye to show it or "Copy" to copy it.
+3. Open the same link and log in with that name and password.
+
+Leave the field empty to turn it off. Give this login only to yourself. "New password" only changes the friend's password. Your own password stays the same.
 
 ## Letting your friend add accounts
 
@@ -76,7 +95,9 @@ RMI only removes an entry whose single handler (`/`) points at the friend server
 
 **The link does not open.** Check that RMI is running and the friend link is on. The PC must be awake and online. Tailscale must be running on your PC. A new Funnel address can take a minute to start working.
 
-**"Too many tries. Wait a minute."** Ten wrong logins from one address in 60 seconds triggers a one minute wait. Wait, then log in with the right username and password. Use "New password" if you lost it.
+**"Wrong username or password."** Check the username and password in your message. Ask the owner for a new password if it still fails.
+
+**"Too many tries. Wait 1 minute, then try again."** Ten wrong logins from one address in 60 seconds triggers a one minute wait. Wait, then log in with the right username and password. Use "New password" if you lost it.
 
 **RMI is locked.** The friend page says the owner's vault is locked. Unlock RMI. While the vault is locked, the friend cannot act.
 

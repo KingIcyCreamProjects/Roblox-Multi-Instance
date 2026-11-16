@@ -138,7 +138,13 @@ function SignIn() {
           <p className="text-12 text-text-3">{t("add.signin.pwNote")}</p>
         </div>
       )}
-      <Button type="submit" variant="primary" className="self-start" disabled={waiting}>
+      <Button
+        type="submit"
+        variant="primary"
+        className="self-start"
+        // a ticked, empty password would save nothing without saying so
+        disabled={waiting || (savePw && !pw)}
+      >
         <LogIn size={16} strokeWidth={2} />
         {waiting ? t("add.signin.waiting") : t("empty.signIn")}
       </Button>

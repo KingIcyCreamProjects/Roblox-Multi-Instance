@@ -5,7 +5,7 @@ import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { openExternal } from "@/lib/events";
 import { call, errMessage, type TsError, type TsStatus } from "@/lib/ipc";
-import { t } from "@/lib/i18n";
+import { t, type MsgKey } from "@/lib/i18n";
 
 const DOWNLOAD = "https://tailscale.com/download";
 const NONE: TsStatus = { installed: false, running: false, dnsName: null, funnelPort: null };
@@ -18,6 +18,13 @@ const asTsError = (e: unknown): TsError => {
     : { code: "failed", url: null, message: errMessage(e) };
 };
 
+/** Sign-in wording per OS (also used by the Devices page's Tailscale gate). */
+export const OS_KEY = {
+  windows: "fs.step2.win",
+  macos: "fs.step2.mac",
+  linux: "fs.step2.linux",
+} as const;
+
 export type State = "done" | "current" | "upcoming";
 
 /** One numbered setup step (also the Devices page's Tailscale gate). */
@@ -26,12 +33,15 @@ export function Step({
   state,
   title,
   desc,
+  tag,
   children,
 }: {
   n: number;
   state: State;
   title: string;
   desc: string;
+  /** live state in words (done / needs you / waiting) */
+  tag?: boolean;
   children?: ReactNode;
 }) {
   return (
@@ -63,7 +73,23 @@ export function Step({
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <h3 className="text-14 font-semibold text-text-1">{title}</h3>
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <h3 className="text-14 font-semibold text-text-1">{title}</h3>
+          {tag && (
+            <span
+              className={clsx(
+                "text-12 font-medium",
+                state === "done"
+                  ? "text-online"
+                  : state === "current"
+                    ? "text-accent"
+                    : "text-text-3",
+              )}
+            >
+              {t(`fs.tag.${state}` as MsgKey)}
+            </span>
+          )}
+        </div>
         <p className="text-13 text-text-2">{desc}</p>
         {children}
       </div>
@@ -110,25 +136,31 @@ export function FriendSetup({ onManual }: { onManual: () => void }) {
     <div>
       <p className="pb-3 text-13 text-text-2">{t("fs.intro")}</p>
       <ol className="-mx-3">
-        <Step n={1} state={s1} title={t("fs.step1")} desc={t("fs.step1.d")}>
+        <Step n={1} state={s1} tag title={t("fs.step1")} desc={t("fs.step1.d")}>
           {s1 === "current" && (
-            <Button
-              className="mt-2.5"
-              sm
-              variant="primary"
-              onClick={() => void openExternal(DOWNLOAD)}
-            >
-              {t("fs.download")}
-            </Button>
+            <>
+              <Button
+                className="mt-2.5"
+                sm
+                variant="primary"
+                onClick={() => void openExternal(DOWNLOAD)}
+              >
+                {t("fs.download")}
+              </Button>
+              <p className="mt-2 text-13 text-text-3">{t("fs.step1.stuck")}</p>
+            </>
           )}
         </Step>
+        <Step n={2} state={s2} tag title={t("fs.step2")} desc={t(OS_KEY[caps?.os ?? "windows"])}>
+          {s2 === "current" && <p className="mt-2 text-13 text-text-3">{t("fs.step2.stuck")}</p>}
+        </Step>
         <Step
-          n={2}
-          state={s2}
-          title={t("fs.step2")}
-          desc={t(caps?.os === "windows" ? "fs.step2.win" : "fs.step2.mac")}
-        />
-        <Step n={3} state={s3} title={t("fs.step3")} desc={t("fs.step3.d")}>
+          n={3}
+          state={s3}
+          tag
+          title={t("fs.step3")}
+          desc={t(s3 === "upcoming" ? "fs.step3.wait" : "fs.step3.d")}
+        >
           {admin ? (
             <div role="alert" className="mt-2.5 flex flex-col gap-2">
               <p className="text-14 font-semibold text-text-1">{t("fs.admin")}</p>
@@ -156,9 +188,12 @@ export function FriendSetup({ onManual }: { onManual: () => void }) {
             </Button>
           )}
           {err && !admin && (
-            <p role="alert" className="mt-2 text-13 text-error">
-              {err.message}
-            </p>
+            <>
+              <p role="alert" className="mt-2 text-13 text-error">
+                {err.message}
+              </p>
+              <p className="mt-1 text-13 text-text-3">{t("fs.fail.hint")}</p>
+            </>
           )}
         </Step>
       </ol>

@@ -31,7 +31,7 @@ const SECTIONS = [
   ["fixed", "updates.fixed"],
 ] as const;
 
-const TABS: readonly string[] = ["home", "accounts", "discover", "automation", "devices"];
+const TABS: readonly string[] = ["home", "accounts", "discover", "devices"];
 
 /** Close the log and open where the line points: a tab, or a settings row. */
 function show(to: string) {

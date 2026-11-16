@@ -11,7 +11,7 @@ through a relay such as the HomeLab hub). Private network only (Tailscale). Neve
 never a public listener. `permessage-deflate` off.
 
 - Host to viewer: **binary messages only**. First byte is the type.
-- Viewer to host: **text messages only**, one JSON object each, at most 4 KB (terminal
+- Viewer to host: **text messages only**, one JSON object each, at most 8 KB (terminal
   input at most 64 KB). Unknown `t` is ignored.
 
 Auth happens before or at the start of the socket and is app-specific (HomeLab: owner

@@ -19,7 +19,7 @@ import { GROUPS, SECTIONS, get, type Item, type SectionId } from "./catalog";
 import { draftPatch, useDraft } from "./draft";
 import { Setting } from "./controls";
 import { TokenRows } from "@/features/automation/TokenSettings";
-import { FriendExtras, FriendGate } from "./FriendSection";
+import { FriendExtras, FriendGate, ownerNameClash } from "./FriendSection";
 import { HomeLabSection } from "./HomeLabSection";
 import { RemoteExtras } from "./RemoteSection";
 import { VaultExtras } from "./VaultSection";
@@ -168,6 +168,7 @@ type Ctx = {
   disabled: boolean;
   csErr: string | null;
   pickClientSettings: () => void;
+  ownerClash: boolean;
 };
 
 const extras: Partial<Record<string, (c: Ctx) => ReactNode>> = {
@@ -184,6 +185,12 @@ const extras: Partial<Record<string, (c: Ctx) => ReactNode>> = {
     </div>
   ),
   "net.allowLan": () => <TokenRows />,
+  "friend.ownerUsername": ({ ownerClash }) =>
+    ownerClash && (
+      <p role="alert" className="pb-2 text-13 text-error">
+        {t("friend.ownerSame")}
+      </p>
+    ),
 };
 
 const sectionExtras: Partial<Record<SectionId, () => ReactNode>> = {
@@ -334,14 +341,24 @@ export function SettingsPage() {
   // after the group renders: scroll the wanted row into view and flash it
   useEffect(() => {
     if (!jumpTo || q) return;
-    const el = scroller.current?.querySelector(
-      jumpTo.startsWith("#") ? `[data-sub="${jumpTo.slice(1)}"]` : `[data-path="${jumpTo}"]`,
-    );
-    if (!el) return;
+    // wait for the page and the OS (caps decide which sections exist)
+    if (!scroller.current || !caps) return;
+    const sub = jumpTo.startsWith("#")
+      ? jumpTo.slice(1)
+      : SECTIONS.find((x) => x.items.some((it) => it.path === jumpTo))?.id;
+    // the row can be absent (friend setup gate, hidden section): land on its section, or give up
+    const el =
+      scroller.current?.querySelector(
+        jumpTo.startsWith("#") ? `[data-sub="${sub}"]` : `[data-path="${jumpTo}"]`,
+      ) ?? scroller.current?.querySelector(`[data-sub="${sub}"]`);
+    if (!el) {
+      setJumpTo(null);
+      return;
+    }
     el.scrollIntoView({ block: "center", behavior: scrollBehavior() });
     setJumpTo(null);
     setFlash(jumpTo);
-  }, [jumpTo, q, gid]);
+  }, [jumpTo, q, gid, caps]);
   // own effect: the jump effect re-runs (and would cancel this timer) as soon as jumpTo clears
   useEffect(() => {
     if (!flash) return;
@@ -374,6 +391,8 @@ export function SettingsPage() {
   };
 
   const value = (path: string) => (path in edits ? edits[path] : get(s, path));
+  // an owner login named like the friend's would be two logins on one name: never saved
+  const ownerClash = ownerNameClash(value("friend.ownerUsername"), value("friend.username"));
   const item = (it: Item) => {
     const reason = reasonFor(it, caps, rbx);
     // parent switch off: the value does nothing yet, so the row dims (it stays editable)
@@ -400,7 +419,7 @@ export function SettingsPage() {
                 : edit(it.path, v, get(s, it.path))
           }
         />
-        {extras[it.path]?.({ rbx, disabled: !!reason, csErr, pickClientSettings })}
+        {extras[it.path]?.({ rbx, disabled: !!reason, csErr, pickClientSettings, ownerClash })}
       </div>
     );
   };
@@ -615,7 +634,11 @@ export function SettingsPage() {
             <Button disabled={n === 0 || set.isPending} onClick={clear}>
               {t("settings.discard")}
             </Button>
-            <Button variant="primary" disabled={n === 0 || set.isPending} onClick={save}>
+            <Button
+              variant="primary"
+              disabled={n === 0 || set.isPending || ownerClash}
+              onClick={save}
+            >
               <Check size={16} strokeWidth={2} aria-hidden />
               {t("settings.save")}
             </Button>

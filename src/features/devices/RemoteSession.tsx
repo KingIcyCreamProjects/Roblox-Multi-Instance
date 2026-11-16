@@ -37,7 +37,12 @@ export function RemoteSession({
   useEffect(() => {
     root.current?.focus({ preventScroll: true });
     useUi.setState({ remoteOpen: true });
+    // a live session counts as activity for the idle auto-lock even when the user only
+    // watches it (locking would end the session); 20 s keeps the throttled vault_touch
+    // calls in App under the shortest auto-lock time (1 minute)
+    const alive = setInterval(() => window.dispatchEvent(new Event(ACTIVITY_EVENT)), 20_000);
     return () => {
+      clearInterval(alive);
       useUi.setState({ remoteOpen: false });
       back.current()?.focus({ preventScroll: true });
     };

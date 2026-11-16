@@ -178,6 +178,45 @@ pub fn stale_port(old: &Value, new: &Value) -> Option<u16> {
     (off || moved || cleared).then_some(port)
 }
 
+/// The new friend port that needs RMI's Funnel entry again: the remote stays on with the same
+/// RMI-made address, but a save moved it to another port (`stale_port` removed the old entry).
+pub fn moved_port(old: &Value, new: &Value) -> Option<u16> {
+    let f = |v: &Value, k: &str| v.pointer(&format!("/friend/{k}")).cloned();
+    let url = f(new, "publicUrl")?;
+    let same_url = rmi_made(url.as_str()?) && f(old, "publicUrl") == Some(url);
+    let on = f(new, "enabled") == Some(Value::Bool(true));
+    let port = u16::try_from(f(new, "port")?.as_u64()?).ok()?;
+    (same_url && on && f(old, "port") != Some(port.into())).then_some(port)
+}
+
+/// The friend port whose Funnel entry must go because the server is not running on it (bind
+/// failed: something else may listen there) while the address is RMI-made.
+pub fn orphan_port(st: &crate::friend::FriendStatus) -> Option<u16> {
+    (!st.running && rmi_made(&st.public_url)).then_some(st.port)
+}
+
+/// Bind failed: remove RMI's Funnel entry for the friend port with `disable` and return the
+/// settings patch that clears the address, which no longer reaches anything (the setup shows
+/// again instead of a dead link). None: nothing to remove, or the removal failed (the address
+/// stays, so "Turn off Funnel" can retry).
+pub fn drop_orphan(
+    st: &crate::friend::FriendStatus,
+    disable: impl FnOnce(u16) -> Result<(), TsError>,
+) -> Option<Value> {
+    match disable(orphan_port(st)?) {
+        Ok(()) => Some(json!({ "friend": { "publicUrl": "" } })),
+        Err(e) => {
+            log::warn!("removing the friend Funnel entry failed: {}", e.message);
+            None
+        }
+    }
+}
+
+/// Funnel on for the friend server on `port`; returns the public URL.
+pub fn enable_port(port: u16) -> Result<String, TsError> {
+    enable_blocking(&target_url(port))
+}
+
 fn target_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
@@ -552,6 +591,55 @@ mod tests {
         let odd = "https://rmi.example.ts.net:4443";
         assert_eq!(stale_port(&s(true, 7812, odd), &s(false, 7812, odd)), None);
         assert_eq!(stale_port(&json!({}), &s(false, 7812, "")), None);
+    }
+
+    #[test]
+    fn moved_port_only_while_on_with_the_same_rmi_address() {
+        let s = |on: bool, port: u16, url: &str| json!({ "friend": { "enabled": on, "port": port, "publicUrl": url } });
+        let ts = "https://rmi.example.ts.net";
+        assert_eq!(
+            moved_port(&s(true, 7812, ts), &s(true, 7900, ts)),
+            Some(7900)
+        );
+        // turned on in the same save: still needs the entry on the new port
+        assert_eq!(
+            moved_port(&s(false, 7812, ts), &s(true, 7900, ts)),
+            Some(7900)
+        );
+        // same port, off, address cleared or changed, not RMI-made: nothing to make
+        assert_eq!(moved_port(&s(true, 7812, ts), &s(true, 7812, ts)), None);
+        assert_eq!(moved_port(&s(true, 7812, ts), &s(false, 7900, ts)), None);
+        assert_eq!(moved_port(&s(true, 7812, ts), &s(true, 7900, "")), None);
+        let other = "https://other.example.ts.net";
+        assert_eq!(moved_port(&s(true, 7812, ts), &s(true, 7900, other)), None);
+        let own = "https://friend.example.com";
+        assert_eq!(moved_port(&s(true, 7812, own), &s(true, 7900, own)), None);
+    }
+
+    #[test]
+    fn drop_orphan_clears_the_address_only_after_removal() {
+        let st = |running: bool, url: &str| crate::friend::FriendStatus {
+            running,
+            port: 7812,
+            public_url: url.into(),
+        };
+        let ts = "https://rmi.example.ts.net";
+        let cleared = Some(json!({ "friend": { "publicUrl": "" } }));
+        let mut asked = None;
+        let got = drop_orphan(&st(false, ts), |p| {
+            asked = Some(p);
+            Ok(())
+        });
+        assert_eq!((got, asked), (cleared, Some(7812)));
+        // removal failed: the address stays so the owner can retry
+        assert_eq!(
+            drop_orphan(&st(false, ts), |_| Err(err("failed", "x"))),
+            None
+        );
+        // running, or not an RMI-made address: nothing removed
+        for s in [st(true, ts), st(false, "https://friend.example.com")] {
+            assert_eq!(drop_orphan(&s, |_| panic!("not removed")), None);
+        }
     }
 
     #[test]

@@ -582,6 +582,7 @@ pub fn rename_group(p: &mut VaultPayload, from: &str, to: &str) -> Result<(), St
     if to == from {
         return Ok(());
     }
+    let merging = p.accounts.iter().any(|a| a.group == to);
     // merging into an existing group appends after its accounts
     let offset = next_order(p, &to);
     for a in p.accounts.iter_mut().filter(|a| a.group == from) {
@@ -591,9 +592,14 @@ pub fn rename_group(p: &mut VaultPayload, from: &str, to: &str) -> Result<(), St
     for g in p.groups.iter_mut().filter(|g| *g == from) {
         g.clone_from(&to);
     }
-    // the target follows the group; on a merge the existing group's target wins
+    // the target follows the group; on a merge the existing group's target wins.
+    // Otherwise a target left on `to` by an emptied group is stale and is replaced.
     if let Some(t) = p.group_targets.remove(from) {
-        p.group_targets.entry(to).or_insert(t);
+        if merging {
+            p.group_targets.entry(to).or_insert(t);
+        } else {
+            p.group_targets.insert(to, t);
+        }
     }
     let mut seen = std::collections::HashSet::new();
     p.groups.retain(|g| seen.insert(g.clone()));
@@ -1321,6 +1327,22 @@ mod tests {
         );
         assert!(!p.group_targets.contains_key("A"));
         assert_eq!(p.groups, ["B"], "no duplicate group names");
+    }
+
+    #[test]
+    fn rename_into_emptied_group_replaces_stale_target() {
+        let mut p = VaultPayload::default();
+        let (_, id) = upsert(&mut p, &who(1, "u"), None, None);
+        update(&mut p, &id, &json!({"group": "C"})).unwrap();
+        let t = |s: &str| LaunchTarget {
+            private_link: Some(s.into()),
+            ..Default::default()
+        };
+        set_group_target(&mut p, "C", Some(t("new"))).unwrap();
+        // "A" has no accounts but still holds an old target
+        p.group_targets.insert("A".into(), t("stale"));
+        rename_group(&mut p, "C", "A").unwrap();
+        assert_eq!(p.group_targets.get("A"), Some(&t("new")));
     }
 
     #[test]

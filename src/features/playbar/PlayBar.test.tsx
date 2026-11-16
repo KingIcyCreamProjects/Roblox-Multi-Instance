@@ -475,13 +475,13 @@ test("launch results toast the account name, or 'An account' while names are hid
   ).toBeInTheDocument();
 });
 
-test("a finished batch refreshes recents and accounts", async () => {
+test("a finished batch refreshes recents; accounts refetch only via accounts://changed", async () => {
   const qc = setup();
   await screen.findByText(t("playbar.none"));
   const spy = vi.spyOn(qc, "invalidateQueries");
   emit(LAUNCH_DONE, { batchId: "b1", launched: 1, failed: 0, cancelled: 0 });
   expect(spy).toHaveBeenCalledWith({ queryKey: ["recents"] });
-  expect(spy).toHaveBeenCalledWith({ queryKey: ["accounts"] });
+  expect(spy).not.toHaveBeenCalledWith({ queryKey: ["accounts"] }); // would skip the save guard
 });
 
 test("a refused launch_start clears the batch and says why", async () => {

@@ -598,12 +598,28 @@ pub fn router(ctx: Ctx) -> Router {
         .with_state(ctx)
 }
 
+/// Longest wait for one outgoing frame. A client that stops reading fills the TCP buffer and
+/// would block `send` forever, keeping the task and socket alive after the hub dropped it.
+const SEND_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
+
+/// False when the send failed or timed out: the caller drops the client.
+async fn send(socket: &mut WebSocket, m: Message) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, socket.send(m)).await,
+        Ok(Ok(()))
+    )
+}
+
 async fn close(mut socket: WebSocket, code: u16, reason: &'static str) {
     let frame = CloseFrame {
         code,
         reason: reason.into(),
     };
-    if socket.send(Message::Close(Some(frame))).await.is_err() {
+    if !send(&mut socket, Message::Close(Some(frame))).await {
         return;
     }
     // Wait (briefly) for the client's close reply: dropping now resets the TCP connection under
@@ -645,7 +661,7 @@ async fn serve(ctx: Ctx, mut socket: WebSocket, q: HashMap<String, String>) {
             out = rx.recv() => match out.filter(|_| !rx.is_closed()) {
                 Some(m) => {
                     let text = serde_json::to_string(&m).unwrap_or_default();
-                    if socket.send(Message::Text(text.into())).await.is_err() {
+                    if !send(&mut socket, Message::Text(text.into())).await {
                         break;
                     }
                 }
@@ -1023,6 +1039,34 @@ mod tests {
         assert!(h.send_message("alice", "x").is_err());
         assert!(!h.snapshot()[0].connected);
         assert!(h.unregister(id), "kicked flag");
+    }
+
+    /// A client that stops reading must not pin its serve task: once the hub drops it, the
+    /// blocked send times out and the task unregisters (clearing the `kicked` entry).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_that_stops_reading_is_released() {
+        let (a, port) = setup().await;
+        let mut c = connect(port, &a.token(), "Alice").await;
+        sync(&mut c).await;
+        let text = "x".repeat(TEXT_MAX);
+        let mut dropped = false;
+        for i in 0..200_000 {
+            if a.ctx.hub.send_message("alice", &text).is_err() {
+                dropped = true;
+                break;
+            }
+            if i % 64 == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        assert!(dropped, "the hub never dropped the client");
+        for _ in 0..100 {
+            if a.ctx.hub.lock().kicked.is_empty() {
+                return drop(c);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("serve task still blocked in send");
     }
 
     #[test]

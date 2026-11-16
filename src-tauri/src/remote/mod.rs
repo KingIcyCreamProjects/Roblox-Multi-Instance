@@ -25,7 +25,8 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::header::{HOST, ORIGIN};
+use axum::http::header::{AUTHORIZATION, HOST, ORIGIN};
+use axum::http::HeaderMap;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -36,7 +37,7 @@ use futures_util::{SinkExt, StreamExt};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
@@ -53,6 +54,12 @@ const CODE_TTL: Duration = Duration::from_secs(300);
 const CODE_TRIES: u32 = 5;
 const LOG_MAX: usize = 20;
 const MAX_PAIRED: usize = 32;
+/// A paired computer reports the accounts it runs this often (`viewer::push_running`); a
+/// report is forgotten after `PEER_TTL` without a new one.
+pub const PUSH_EVERY: Duration = Duration::from_secs(15);
+const PEER_TTL: Duration = Duration::from_secs(45);
+/// Most Roblox user ids one report may carry.
+const MAX_RUNNING: usize = 256;
 const STORE_FILE: &str = "remote.json";
 const AUTH_WAIT: Duration = Duration::from_secs(10);
 const MAX_UNACKED: usize = 4;
@@ -155,9 +162,17 @@ fn bye_msg(code: &str, by: Option<&str>) -> Value {
 }
 
 /// Peer / device names: trimmed, control characters dropped, at most 40 characters.
+/// Invisible format characters (bidi overrides and isolates, zero-width marks) go too: a name
+/// with U+202E would show reversed in the session list and on the friend page. U+200C and
+/// U+200D (zero-width non-joiner and joiner) stay: Persian, Indic scripts and emoji need them.
 pub fn clean_name(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}' | '\u{200e}' | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'
+                    | '\u{fff9}'..='\u{fffb}')
+        })
         .collect::<String>()
         .trim()
         .chars()
@@ -261,7 +276,12 @@ struct Inner {
     stopped_at: Mutex<Option<Instant>>,
     /// Where uploads land instead of the Downloads folder (tests).
     downloads: Mutex<Option<PathBuf>>,
+    /// What each paired computer last said it runs, by paired id.
+    peers: Mutex<HashMap<String, Report>>,
 }
+
+/// A paired computer's report: when, its name, the Roblox user ids with a client there.
+type Report = (Instant, String, Vec<u64>);
 
 type Ctx = Arc<Inner>;
 
@@ -455,6 +475,7 @@ impl Remote {
                 pre_auth: Arc::new(tokio::sync::Semaphore::new(MAX_PRE_AUTH)),
                 stopped_at: Mutex::default(),
                 downloads: Mutex::default(),
+                peers: Mutex::default(),
             }),
             running: tokio::sync::Mutex::new(None),
         }
@@ -476,6 +497,22 @@ impl Remote {
 
     pub fn device_name(&self) -> String {
         self.c.name()
+    }
+
+    /// A paired computer's report, as the `running` route stores it.
+    #[cfg(test)]
+    pub(crate) fn note_running(&self, peer: &str, name: &str, ids: Vec<u64>) {
+        lock(&self.c.peers).insert(peer.into(), (Instant::now(), name.into(), ids));
+    }
+
+    /// (Roblox user id, computer name) for every account a paired computer reported running
+    /// within `PEER_TTL`.
+    pub fn running_elsewhere(&self) -> Vec<(u64, String)> {
+        let mut m = lock(&self.c.peers);
+        m.retain(|_, (at, ..)| at.elapsed() < PEER_TTL);
+        m.values()
+            .flat_map(|(_, name, ids)| ids.iter().map(move |i| (*i, name.clone())))
+            .collect()
     }
 
     pub fn live(&self) -> Option<Live> {
@@ -694,6 +731,7 @@ fn router(c: Ctx) -> Router {
     Router::new()
         .route("/v1/remote/hello", get(hello))
         .route("/v1/remote/pair", post(pair))
+        .route("/v1/remote/running", post(running))
         .route("/v1/remote/ws", get(ws))
         .fallback(|| async { ApiError::not_found("No such endpoint") })
         .layer(DefaultBodyLimit::max(MAX_TEXT))
@@ -729,6 +767,49 @@ async fn host_guard(State(c): State<Ctx>, req: Request, next: Next) -> Response 
 async fn hello(State(c): State<Ctx>) -> Response {
     let busy = lock(&c.live).is_some();
     Json(json!({ "app": "rmi", "proto": 1, "name": c.name(), "busy": busy })).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunningBody {
+    name: String,
+    user_ids: Vec<u64>,
+}
+
+/// A paired computer says which Roblox accounts (user ids) have a client there right now, so
+/// the friend page here can name the computer an account is on. Same check as a session:
+/// its token, used from the IP it paired from.
+async fn running(
+    State(c): State<Ctx>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    b: Result<Json<RunningBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let who = c.who(token, &from.ip().to_string()).filter(|_| c.on());
+    let Some((paired_name, id)) = who else {
+        return Err(ApiError::new(
+            403,
+            "forbidden",
+            "Not paired with this device.",
+        ));
+    };
+    let b = b
+        .map_err(|_| ApiError::new(400, "bad_request", "Bad request"))?
+        .0;
+    if b.user_ids.len() > MAX_RUNNING {
+        return Err(ApiError::new(400, "bad_request", "Too many accounts"));
+    }
+    // The name that computer gives itself, else the one it paired under.
+    let name = Some(clean_name(&b.name))
+        .filter(|n| !n.is_empty())
+        .unwrap_or(paired_name);
+    lock(&c.peers).insert(id, (Instant::now(), name, b.user_ids));
+    Ok(Json(json!({})).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1707,7 +1788,9 @@ fn grabber(c: &Capture, slot: &Slot) {
                     refine = if h264 { REFINE } else { 0 };
                     Some(s)
                 }
-                None if refine > 0 && h264 => {
+                // only once the encoder took the job before: a repeat offered over one it
+                // has not taken would replace it unencoded and still be counted
+                None if refine > 0 && h264 && lock(&slot.0).is_none() => {
                     refine -= 1;
                     last.as_ref()
                         .filter(|(lw, _, _)| *lw == w)

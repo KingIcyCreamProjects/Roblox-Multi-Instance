@@ -151,6 +151,35 @@ test("paste cookies shows per-line results and stays open", async () => {
   expect(box).toHaveValue("not a cookie"); // rejected lines stay to fix
 });
 
+test("Delete ignores selected accounts a search has hidden", async () => {
+  const user = userEvent.setup();
+  setup();
+  mockVault.lastArgs = {};
+  const search = await screen.findByRole("searchbox", { name: t("accounts.search") });
+  await user.type(search, "kestrel");
+  useUi.setState({ sel: { ids: ["acc-3"], anchor: "acc-3", cursor: "acc-3" } }); // Pylon, hidden
+  screen.getByRole("grid", { name: t("accounts.listLabel") }).focus();
+  await user.keyboard("{Delete}");
+  await new Promise((r) => setTimeout(r, 50));
+  expect(mockVault.lastArgs.accounts_remove).toBeUndefined();
+  expect(useUi.getState().sel.ids).toEqual(["acc-3"]);
+  // Enter must not fall back to a hidden cursor either
+  await user.keyboard("{Enter}");
+  await new Promise((r) => setTimeout(r, 50));
+  expect(mockVault.lastArgs.launch_start).toBeUndefined();
+});
+
+test("sign in with Save password ticked needs a password", async () => {
+  const user = userEvent.setup();
+  setup();
+  await user.click(await screen.findByRole("button", { name: t("accounts.add") }));
+  await user.click(await screen.findByLabelText(t("add.signin.savePw")));
+  const go = screen.getByRole("button", { name: t("empty.signIn") });
+  expect(go).toBeDisabled();
+  await user.type(screen.getByLabelText(t("add.signin.pw")), "x");
+  expect(go).toBeEnabled();
+});
+
 test("sign in passes an opted-in password once, then clears it", async () => {
   const user = userEvent.setup();
   setup();

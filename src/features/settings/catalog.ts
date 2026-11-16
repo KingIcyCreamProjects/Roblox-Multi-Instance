@@ -17,7 +17,14 @@ export type Item = {
   /** disabled with a reason when the platform lacks this capability */
   cap?: keyof Pick<
     Capabilities,
-    "launch" | "multiInstance" | "cookieLock" | "windowRect" | "watcher" | "clientHelpers"
+    | "launch"
+    | "multiInstance"
+    | "cookieLock"
+    | "windowRect"
+    | "watcher"
+    | "clientHelpers"
+    | "fullscreenWait"
+    | "audio"
   >;
   /** red note under the row (i18n key) */
   warn?: MsgKey;
@@ -55,6 +62,7 @@ const n = (path: string, min: number, max: number, extra: Partial<Item> = {}): I
 });
 const port = (path: string): Item => ({ path, kind: "port", min: 1024, max: 65535 });
 const W = ["watcher.enabled"];
+const A = ["automation.enabled"];
 
 export const SECTIONS: { id: SectionId; items: Item[] }[] = [
   {
@@ -64,7 +72,8 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       b("launch.replacePrevious"),
       n("launch.randomPages", 1, 50),
       b("launch.restoreWindowRect", { cap: "windowRect" }),
-      b("launch.startMinimized"),
+      // Minimizing goes through the same window setup as restoring the window rect.
+      b("launch.startMinimized", { cap: "windowRect" }),
       n("recents.max", 1, 50),
       b("startup.launchOnLogin"),
       b("startup.minimized"),
@@ -77,10 +86,12 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
     items: [
       b("multi.enabled", { cap: "multiInstance" }),
       b("multi.cookieLock", { cap: "cookieLock" }),
-      b("fps.unlock", { cap: "launch" }),
-      n("fps.value", 1, 240, { cap: "launch", dep: ["fps.unlock"] }),
-      b("graphics.set", { cap: "launch" }),
-      n("graphics.level", 1, 10, { cap: "launch", dep: ["graphics.set"] }),
+      // FPS and graphics are written to Roblox's own settings file, which only exists on
+      // Windows and macOS (Sober on Linux keeps its own): gated like the other client helpers.
+      b("fps.unlock", { cap: "clientHelpers" }),
+      n("fps.value", 1, 240, { cap: "clientHelpers", dep: ["fps.unlock"] }),
+      b("graphics.set", { cap: "clientHelpers" }),
+      n("graphics.level", 1, 10, { cap: "clientHelpers", dep: ["graphics.set"] }),
       {
         path: "client.customSettingsPath",
         kind: "text",
@@ -88,7 +99,6 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
         cap: "launch",
         onBlur: true,
       },
-      b("client.bootstrapperPassthrough", { cap: "clientHelpers" }),
       b("antiAfk.enabled", { cap: "clientHelpers" }),
       n("antiAfk.everyMin", 1, 19, { cap: "clientHelpers", dep: ["antiAfk.enabled"] }),
       n("antiAfk.idleSec", 1, 120, { cap: "clientHelpers", dep: ["antiAfk.enabled"] }),
@@ -117,15 +127,15 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
     id: "control",
     items: [
       b("automation.enabled"),
-      port("ws.port"),
-      b("ws.startOnLaunch"),
-      port("api.port"),
-      b("api.enableRead"),
-      b("api.enableLaunch"),
-      b("api.enableEdit"),
-      b("api.enableSocial"),
-      b("api.enableSecrets"),
-      b("net.allowLan", { warn: "settings.lanWarn" }),
+      { ...port("ws.port"), dep: A },
+      b("ws.startOnLaunch", { dep: A }),
+      { ...port("api.port"), dep: A },
+      b("api.enableRead", { dep: A }),
+      b("api.enableLaunch", { dep: A }),
+      b("api.enableEdit", { dep: A }),
+      b("api.enableSocial", { dep: A }),
+      b("api.enableSecrets", { dep: A }),
+      b("net.allowLan", { warn: "settings.lanWarn", dep: A }),
     ],
   },
   {
@@ -139,7 +149,20 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
         dep: ["friend.enabled"],
         placeholder: "https://your-computer.ts.net",
       },
-      { path: "friend.username", kind: "text", dep: ["friend.enabled"] },
+      {
+        path: "friend.username",
+        kind: "text",
+        max: 32,
+        placeholder: "friend",
+        dep: ["friend.enabled"],
+      },
+      {
+        path: "friend.ownerUsername",
+        kind: "text",
+        max: 32,
+        placeholder: "owner",
+        dep: ["friend.enabled"],
+      },
       b("friend.canAdd", { dep: ["friend.enabled"], warn: "set.friend.canAdd.warn" }),
     ],
   },
@@ -150,7 +173,7 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       { ...port("remote.port"), dep: ["remote.enabled"] },
       { path: "remote.deviceName", kind: "text", dep: ["remote.enabled"] },
       b("remote.files", { dep: ["remote.enabled"] }),
-      b("remote.audio", { dep: ["remote.enabled"] }),
+      b("remote.audio", { cap: "audio", dep: ["remote.enabled"] }),
     ],
   },
   {
@@ -160,15 +183,16 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       n("relaunch.defaultDelaySec", 0, 3600),
       b("relaunch.checkInternet"),
       b("relaunch.usePresence"),
-      n("clients.minimizeEverySec", 0, 86_400, { cap: "clientHelpers" }),
-      n("clients.closeAfterMin", 0, 10_080, { cap: "clientHelpers" }),
+      n("clients.minimizeEverySec", 0, 86_400, { cap: "clientHelpers", dep: A }),
+      n("clients.closeAfterMin", 0, 10_080, { cap: "clientHelpers", dep: A }),
       {
         path: "clients.closeScope",
         kind: "enum",
         options: ["instance", "global"],
         cap: "clientHelpers",
+        dep: A,
       },
-      n("clients.maxInstances", 0, 100, { cap: "clientHelpers" }),
+      n("clients.maxInstances", 0, 100, { cap: "clientHelpers", dep: A }),
     ],
   },
   {
@@ -178,19 +202,19 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       n("watcher.scanSec", 2, 600, { cap: "watcher", dep: W }),
       b("watcher.closeLowMemory", { cap: "watcher", dep: W }),
       n("watcher.lowMemoryMb", 20, 1000, { cap: "watcher", dep: [...W, "watcher.closeLowMemory"] }),
-      b("watcher.closeWrongTitle", { cap: "watcher", dep: W }),
+      b("watcher.closeWrongTitle", { cap: "windowRect", dep: W }),
       {
         path: "watcher.expectedTitle",
         kind: "text",
-        cap: "watcher",
+        cap: "windowRect",
         dep: [...W, "watcher.closeWrongTitle"],
       },
       b("watcher.closeNoServer", { cap: "watcher", dep: W }),
       n("watcher.noServerSec", 10, 3600, { cap: "watcher", dep: [...W, "watcher.closeNoServer"] }),
       b("watcher.ignoreExisting", { cap: "watcher", dep: W }),
-      b("watcher.saveWindowRects", { cap: "watcher", dep: W }),
+      b("watcher.saveWindowRects", { cap: "windowRect", dep: W }),
       b("watcher.reconnect", { cap: "watcher", dep: W }),
-      b("watcher.waitForGame", { cap: "watcher", dep: W }),
+      b("watcher.waitForGame", { cap: "fullscreenWait", dep: [...W, "watcher.reconnect"] }),
     ],
   },
   {

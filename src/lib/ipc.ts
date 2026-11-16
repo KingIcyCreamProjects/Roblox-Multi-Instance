@@ -23,6 +23,8 @@ export type Settings = Record<string, unknown> & {
     port: number;
     publicUrl: string;
     username: string;
+    /** the owner's own login (sees every account); empty = off */
+    ownerUsername: string;
     canAdd: boolean;
   };
   remote: { enabled: boolean; port: number; deviceName: string; files: boolean; audio: boolean };
@@ -81,6 +83,8 @@ export type Capabilities = {
   windowRect: boolean;
   watcher: boolean;
   clientHelpers: boolean;
+  fullscreenWait: boolean;
+  audio: boolean;
 };
 
 export type WatcherClient = {
@@ -591,6 +595,9 @@ type Commands = {
   /** Secret: the friend password. */
   friend_password: [Record<string, never>, string];
   friend_password_copy: [Record<string, never>, void];
+  /** Secret: the owner login's password. */
+  friend_owner_password: [Record<string, never>, string];
+  friend_owner_password_copy: [Record<string, never>, void];
   /** New friend password and token (signs the friend out); returns the password. */
   friend_new_password: [Record<string, never>, string];
   automation_snapshot: [Record<string, never>, AutomationAccount[]];
@@ -601,7 +608,8 @@ type Commands = {
     {
       account: string;
       enabled: boolean;
-      delaySec: number;
+      /** omitted = the account follows the Settings default */
+      delaySec?: number;
       placeId?: number | null;
       jobId?: string | null;
     },

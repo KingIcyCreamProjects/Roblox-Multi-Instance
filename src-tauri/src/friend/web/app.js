@@ -2,7 +2,9 @@
 // RMI Remote. Same-origin only. Server strings go through textContent, never innerHTML.
 const KEY = "rmiToken";
 const $ = (id) => document.getElementById(id);
-const STATUS = { inGame: "In game", online: "Online", offline: "Offline", paused: "Paused" }; // paused: the detail line says "Disconnected by you"
+const STATUS = { inGame: "In game", online: "Online", starting: "Starting", offline: "Offline", paused: "Paused" }; // paused: the detail line says "Disconnected by you"
+const SUM = { here: "in game", away: "on another computer", starting: "starting", online: "online, not in a game", paused: "disconnected by you", offline: "not running" }; // summary line buckets, in order
+const NS = "http://www.w3.org/2000/svg";
 const FAST_MS = 1000; // poll rate while an action is settling
 const SLOW_MS = 5000;
 const SETTLE_MS = 30000; // give up waiting for the status flip after this
@@ -36,18 +38,19 @@ function dropToken() {
   try { localStorage.removeItem(KEY); } catch { /* nothing stored */ }
 }
 
-// AbortSignal.timeout is Safari 16+: older browsers just wait as before
-const timeout = () => AbortSignal.timeout?.(15000);
+// a stalled request (cellular handoff, resumed home-screen app) must not freeze polling.
+// AbortSignal.timeout is Safari 16+, so: one AbortController and a timer. The timer is left
+// to run out: it also covers reading the body, and aborting a finished request does nothing.
+function tfetch(path, opts) {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 15000);
+  return fetch(path, { ...opts, signal: ac.signal });
+}
 
 async function api(path, opts = {}) {
   let res;
   try {
-    res = await fetch(path, {
-      ...opts,
-      headers: { ...opts.headers, Authorization: "Bearer " + token },
-      // a stalled request (cellular handoff, resumed home-screen app) must not freeze polling
-      signal: timeout(),
-    });
+    res = await tfetch(path, { ...opts, headers: { ...opts.headers, Authorization: "Bearer " + token } });
   } catch {
     throw { code: "network", message: NO_REACH };
   }
@@ -62,8 +65,8 @@ async function api(path, opts = {}) {
 // Login error text for an HTTP status (0: no response).
 function loginError(status) {
   if (status === 0 || status >= 502) return NO_REACH; // 502-504: the tunnel, not RMI
-  if (status === 401) return "Wrong username or password";
-  if (status === 429) return "Too many tries. Wait a minute.";
+  if (status === 401) return "Wrong username or password. Check them, or ask the owner for a new password.";
+  if (status === 429) return "Too many tries. Wait 1 minute, then try again.";
   if (status === 403) return "Open the link the owner sent you.";
   return "Something went wrong";
 }
@@ -82,6 +85,7 @@ function showLogin(msg) {
   $("empty").hidden = true;
   $("banner").hidden = true;
   $("updated").hidden = true;
+  $("summary").hidden = true;
   $("add").hidden = true;
   addAt = 0;
   if ($("add-sheet").open) $("add-sheet").close();
@@ -141,23 +145,39 @@ async function loadAvatar(c) {
 
 function makeCard(acc) {
   const li = el("li", "card");
-  const head = el("div", "head");
   const av = el("div", "av");
-  const who = el("div", "who");
+  const head = el("div", "head");
   const name = el("div", "name");
-  const sub = el("div", "sub");
-  who.append(name, sub);
   const pill = el("span", "pill");
-  head.append(av, who, pill);
+  head.append(name, pill);
+  // two quiet lines: game + uptime, then @username + computer
   const detail = el("div", "detail");
+  const l1 = el("div");
   const game = el("span");
-  const up = el("span");
-  detail.append(game, up);
-  const acts = el("div", "acts");
+  const up = el("span", "up");
+  l1.append(game, up);
+  const l2 = el("div");
+  const sub = el("span");
+  const comp = el("span", "comp");
+  const compText = el("span");
+  const glyph = document.createElementNS(NS, "svg"); // small monitor
+  for (const [k, v] of [["viewBox", "0 0 16 16"], ["width", "12"], ["height", "12"], ["fill", "none"], ["stroke", "currentColor"], ["stroke-width", "1.5"], ["stroke-linecap", "round"], ["aria-hidden", "true"]]) glyph.setAttribute(k, v);
+  const screen = document.createElementNS(NS, "rect");
+  for (const [k, v] of [["x", "2"], ["y", "2.5"], ["width", "12"], ["height", "8"], ["rx", "1.5"]]) screen.setAttribute(k, v);
+  const stand = document.createElementNS(NS, "path");
+  stand.setAttribute("d", "M5.5 13.5h5M8 10.5v3");
+  glyph.append(screen, stand);
+  comp.append(glyph, compText);
+  l2.append(sub, comp);
+  detail.append(l1, l2);
+  const act = el("button", "btn");
+  act.type = "button";
+  act.onclick = () => run(c);
+  const acts = el("div", "acts"); // the "different game" link and field, only on a row with no client here
   const note = el("p", "note");
   note.setAttribute("role", "status");
   note.hidden = true;
-  li.append(head, detail, acts, note);
+  li.append(av, head, detail, act, acts, note);
 
   const field = el("input");
   field.type = "url";
@@ -172,17 +192,15 @@ function makeCard(acc) {
   const toggle = el("button", "link", "Use a different game");
   toggle.type = "button";
   toggle.onclick = () => { field.hidden = !field.hidden; toggle.textContent = field.hidden ? "Use a different game" : "Use the same game"; if (!field.hidden) field.focus(); };
-  const act = el("button", "btn");
-  act.type = "button";
-  act.onclick = () => run(c);
-  acts.append(field, act, toggle); // the link first, then the button that uses it
+  acts.append(field, toggle);
 
-  const c = { li, acc, pend: null, refs: { av, name, sub, pill, game, up, act, field, toggle, note } };
+  const c = { li, acc, pend: null, refs: { av, name, sub, pill, game, up, comp, compText, act, field, toggle, acts, note } };
   return c;
 }
 
-// inGame/online: RMI has a client for it, offer Disconnect. offline/paused (or unknown): Reconnect.
-const isLive = (acc) => acc.status === "inGame" || acc.status === "online";
+// inGame/online/starting: RMI has a client for it here, offer Disconnect. offline/paused (or unknown),
+// or running on another computer (nothing here to disconnect): Reconnect.
+const isLive = (acc) => !acc.elsewhere && (acc.status === "inGame" || acc.status === "online" || acc.status === "starting");
 
 function note(c, text, err, spin) {
   const n = c.refs.note;
@@ -241,13 +259,16 @@ function paint(c, acc) {
   const label = acc.displayName || acc.username;
   r.name.textContent = label;
   r.sub.textContent = "@" + acc.username;
-  // in a game on another computer: not "Offline / Not running". The button stays Reconnect
+  // running on another computer wins over the status. The button stays Reconnect
   // (nothing here to disconnect); pressing it starts the account on this computer.
   const away = !!acc.elsewhere;
-  r.pill.textContent = away ? STATUS.inGame : STATUS[acc.status] || acc.status;
-  r.pill.dataset.s = away ? "inGame" : acc.status;
+  r.pill.textContent = away ? "Other computer" : STATUS[acc.status] || acc.status;
+  r.pill.dataset.s = away ? "elsewhere" : acc.status;
   // in game before the place name resolves: never "In game" next to "Not in a game"
-  r.game.textContent = away ? (acc.game ? acc.game + " · " : "") + "On another computer" : acc.game || (acc.status === "inGame" ? "In a game" : acc.status === "online" ? "Not in a game" : acc.status === "paused" ? "Disconnected by you" : "Not running");
+  r.game.textContent = acc.game || (away ? "" : { inGame: "In a game", online: "Not in a game", starting: "Starting Roblox", paused: "Disconnected by you" }[acc.status] || "Not running here");
+  const where = away ? "On " + (acc.computer || "another computer") : acc.computer || "";
+  r.compText.textContent = where;
+  r.comp.hidden = !where;
   r.up.textContent = isLive(acc) && acc.uptimeSec != null ? "Up " + uptime(acc.uptimeSec) : "";
   if (!avatars.get(acc.id)?.url && r.av.tagName !== "IMG") r.av.textContent = (label[0] || "?").toUpperCase();
   const live = isLive(acc);
@@ -279,13 +300,19 @@ function paint(c, acc) {
   c.li.classList.toggle("busy", !!p);
   r.toggle.hidden = live || !!p;
   if (live || p) { r.field.hidden = true; r.toggle.textContent = "Use a different game"; }
+  r.acts.hidden = r.toggle.hidden && r.field.hidden;
   loadAvatar(c);
 }
 
 // Glass confirm sheet in place of confirm().
-function confirmSheet(label) {
+// away (a computer name): the account runs elsewhere, ask before starting it here too.
+function confirmSheet(label, away) {
   const d = $("sheet");
-  $("sheet-title").textContent = `Disconnect ${label}?`;
+  $("sheet-title").textContent = away ? `This account is running on ${away}. Start it here too?` : `Disconnect ${label}?`;
+  $("sheet-text").hidden = !!away;
+  $("sheet-yes").textContent = away ? "Start here" : "Disconnect";
+  $("sheet-yes").classList.toggle("danger", !away);
+  $("sheet-yes").classList.toggle("accent", !!away);
   return new Promise((res) => {
     d.addEventListener("close", () => { quiet = Date.now() + SHEET_MS; res(d.returnValue === "yes"); }, { once: true });
     d.returnValue = "no";
@@ -301,6 +328,7 @@ async function run(c) {
   if (c.pend || Date.now() < Math.max(quiet, c.hold || 0)) return;
   const kind = isLive(acc) ? "disconnect" : "reconnect";
   if (kind === "disconnect" && !(await confirmSheet(acc.displayName || acc.username))) return;
+  if (kind === "reconnect" && acc.elsewhere && !(await confirmSheet("", acc.computer || "another computer"))) return;
   if (c.pend) return;
   const link = refs.field.hidden ? "" : refs.field.value.trim();
   c.pend = { kind, t0: Date.now(), posting: true };
@@ -377,6 +405,13 @@ function render(list) {
     if (ul.children[i] !== c.li) ul.insertBefore(c.li, ul.children[i] || null);
   });
   $("empty").hidden = list.length > 0;
+  const n = {};
+  for (const a of list) {
+    const k = a.elsewhere ? "away" : a.status === "inGame" ? "here" : a.status in SUM ? a.status : "offline";
+    n[k] = (n[k] || 0) + 1;
+  }
+  $("summary").textContent = Object.keys(SUM).filter((k) => n[k]).map((k) => `${n[k]} ${SUM[k]}`).join(" · ");
+  $("summary").hidden = !list.length;
 }
 
 async function refresh() {
@@ -431,12 +466,11 @@ $("login").addEventListener("submit", async (ev) => {
   let status = 0;
   let t = null;
   try {
-    const res = await fetch("/login", {
+    const res = await tfetch("/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // a password copied out of a chat often carries a stray space; generated ones never have one
       body: JSON.stringify({ username: $("user").value, password: $("pass").value.trim() }),
-      signal: timeout(),
     });
     status = res.status;
     if (res.ok) t = (await res.json()).token;

@@ -179,13 +179,18 @@ pub fn frame(
         }
         let s = match &mut st.cur {
             Some(s) => s,
-            None => st.cur.insert(H264 {
-                enc: imp::Enc::new(w, h, kbps, fps, &st.bad)?,
-                dims: (w, h),
-                kbps,
-                fps,
-                made: 0,
-            }),
+            None => {
+                // the old encoder's SPS/PPS (another size, maybe another encoder) do not
+                // describe this one's slices
+                st.params.clear();
+                st.cur.insert(H264 {
+                    enc: imp::Enc::new(w, h, kbps, fps, &st.bad)?,
+                    dims: (w, h),
+                    kbps,
+                    fps,
+                    made: 0,
+                })
+            }
         };
         #[cfg(test)]
         let r = if st.fail {

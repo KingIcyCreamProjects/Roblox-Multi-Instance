@@ -82,6 +82,8 @@ pub enum Act {
 #[derive(Default)]
 struct St {
     prev_up: Option<bool>,
+    /// `Obs::own` last tick: its rise clears `quiet`.
+    prev_own: bool,
     prev_enabled: bool,
     /// Due time; `true` = a re-arm after our failed relaunch (the batch's own-launch
     /// grace must not cancel it). One field, so clearing the pending clears both.
@@ -90,7 +92,7 @@ struct St {
     last: Option<Instant>,
     count: u32,
     stopped: bool,
-    /// RMI closed this client itself: no trigger until it is up again.
+    /// RMI closed this client itself: no trigger until it is up again (or RMI launches it).
     quiet: bool,
     /// `unquiet`: the watcher gave up its reconnect; arm once if still down (not own).
     handback: bool,
@@ -128,10 +130,13 @@ impl Engine {
                 s.prev_up == Some(true) && !o.up,
                 s.prev_up == Some(false) && o.up,
             );
-            // Up again, also when the edge was forgotten by `reset` (no "rise" then).
-            if o.up && s.prev_up != Some(true) {
+            // Up again, also when the edge was forgotten by `reset` (no "rise" then). Or a
+            // new RMI launch of it started (e.g. the watcher's reconnect): its client is
+            // watched again. Only the start: a close during that launch stays quiet.
+            if (o.up && s.prev_up != Some(true)) || (o.own && !s.prev_own) {
                 s.quiet = false;
             }
+            s.prev_own = o.own;
             if o.up {
                 s.handback = false;
             }
@@ -233,9 +238,11 @@ impl Engine {
     }
 
     /// The watcher's reconnect after `quiet` gave up or failed: auto-relaunch owns the
-    /// account again and relaunches it if it is still down.
+    /// account again and relaunches it if it is still down. Also when `quiet` is already
+    /// clear: the reconnect's own launch start clears it, and that batch may launch nothing.
+    /// `tick` still arms only while the account is down and not in an RMI launch.
     pub fn unquiet(&mut self, account: &str) {
-        if let Some(s) = self.st.get_mut(&k(account)).filter(|s| s.quiet) {
+        if let Some(s) = self.st.get_mut(&k(account)) {
             s.quiet = false;
             s.handback = true;
         }
@@ -599,7 +606,10 @@ impl Loop {
             return vec![];
         }
 
-        let use_presence = s.pointer("/relaunch/usePresence") == Some(&Value::Bool(true));
+        // Presence switched off empties the presence map: fall back to the socket, else
+        // every account would look disconnected.
+        let use_presence = s.pointer("/relaunch/usePresence") == Some(&Value::Bool(true))
+            && s.pointer("/presence/enabled") != Some(&Value::Bool(false));
         let presence = st
             .accounts
             .presence
@@ -1137,6 +1147,34 @@ mod tests {
         assert_ne!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
     }
 
+    /// Watcher reconnect launched: the new client crashing before it is up relaunches. A
+    /// close during that launch (helper) stays quiet.
+    #[tokio::test(start_paused = true)]
+    async fn quiet_clears_when_rmi_launches_again() {
+        let own = |own| Obs {
+            own,
+            ..obs("a", false)
+        };
+        let exited = Obs {
+            exited: true,
+            ..obs("a", false)
+        };
+        let mut e = Engine::default();
+        e.tick(Instant::now(), &[obs("a", false)], SP);
+        e.quiet("a");
+        e.tick(at(1).await, std::slice::from_ref(&exited), SP); // the watcher's close
+        e.tick(at(5).await, &[own(true)], SP); // its reconnect launch
+        e.quiet("a"); // closed again during that launch
+        e.tick(at(1).await, &[own(true)], SP);
+        e.tick(at(30).await, &[own(false)], SP);
+        e.tick(at(1).await, std::slice::from_ref(&exited), SP);
+        assert_eq!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
+        e.tick(at(5).await, &[own(true)], SP); // a later launch
+        e.tick(at(30).await, &[own(false)], SP);
+        e.tick(at(1).await, &[exited], SP); // its client crashed
+        assert_ne!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
+    }
+
     /// Watcher reconnect gave up: relaunch takes over while the account is still down.
     #[tokio::test(start_paused = true)]
     async fn unquiet_hands_back() {
@@ -1148,11 +1186,28 @@ mod tests {
         e.unquiet("a");
         e.tick(at(1).await, &[obs("a", false)], SP);
         assert_ne!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
-        // not quiet: no-op
+        // The reconnect's launch start cleared quiet, then the batch launched nothing:
+        // still handed back once it is no longer an RMI launch.
+        let own = |own| Obs {
+            own,
+            ..obs("a", false)
+        };
         let mut e = Engine::default();
-        e.tick(Instant::now(), &[obs("a", false)], SP);
-        e.unquiet("a");
+        e.tick(Instant::now(), &[obs("a", true)], SP);
+        e.quiet("a");
         e.tick(at(1).await, &[obs("a", false)], SP);
+        e.tick(at(5).await, &[own(true)], SP);
+        e.unquiet("a");
+        e.tick(at(1).await, &[own(true)], SP);
+        assert_eq!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
+        e.tick(at(1).await, &[own(false)], SP);
+        assert_ne!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
+        // Up: no hand-back.
+        let mut e = Engine::default();
+        e.tick(Instant::now(), &[obs("a", true)], SP);
+        e.unquiet("a");
+        e.tick(at(1).await, &[obs("a", true)], SP);
+        e.tick(at(1).await, &[obs("a", true)], SP);
         assert_eq!(e.status("a", Instant::now(), 0)["pendingAt"], Value::Null);
     }
 
@@ -1345,6 +1400,22 @@ mod tests {
             .insert("A".into(), in_game());
         assert!(poll(&mut l, &h, true).await.is_empty());
         h.0.accounts.presence.lock().unwrap().clear();
+        assert_eq!(poll(&mut l, &h, true).await, ["A"]);
+    }
+
+    /// Presence off (empty map): usePresence falls back to the socket.
+    #[tokio::test(start_paused = true)]
+    async fn loop_presence_mode_with_presence_off_uses_socket() {
+        let d = tempfile::tempdir().unwrap();
+        let (h, _) = fixture(d.path());
+        set(&h, "/relaunch/usePresence", json!(true));
+        set(&h, "/presence/enabled", json!(false));
+        let mut l = Loop::default();
+        let ca = arm(&h, "Alice", 0);
+        for _ in 0..3 {
+            assert!(poll(&mut l, &h, true).await.is_empty());
+        }
+        h.0.automation.ctx.hub.fake_disconnect(ca);
         assert_eq!(poll(&mut l, &h, true).await, ["A"]);
     }
 

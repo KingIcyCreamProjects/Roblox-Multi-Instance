@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { useSettings } from "@/app/useSettings";
 import { Row } from "@/features/settings/controls";
 import { call } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
@@ -66,9 +67,12 @@ function CopyBlock({ label, shown, template }: { label: string; shown: string; t
 /** Settings → Automation token rows. Masked on screen (last 4 visible); copies carry the real value. */
 export function TokenRows() {
   const qc = useQueryClient();
+  // While Automation is off the backend only has a throwaway token: the saved one loads on enable.
+  const on = !!useSettings().data?.automation.enabled;
   const { data: tok = "" } = useQuery({
     queryKey: ["autoToken"],
     queryFn: () => call("automation_token"),
+    enabled: on,
   });
   const { data: st } = useQuery({
     queryKey: ["autoStatus"],
@@ -83,6 +87,7 @@ export function TokenRows() {
       setConfirm(false);
     }, reportError);
 
+  if (!on) return null;
   return (
     <>
       <Row

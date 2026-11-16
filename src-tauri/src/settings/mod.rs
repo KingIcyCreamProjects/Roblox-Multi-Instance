@@ -31,7 +31,7 @@ pub fn defaults() -> Value {
         "ws": { "port": 7810, "startOnLaunch": false },
         "api": { "port": 7811, "enableRead": false, "enableLaunch": false, "enableEdit": false, "enableSocial": false, "enableSecrets": false },
         "net": { "allowLan": false },
-        "friend": { "enabled": false, "port": 7812, "publicUrl": "", "username": "friend", "canAdd": false },
+        "friend": { "enabled": false, "port": 7812, "publicUrl": "", "username": "friend", "ownerUsername": "", "canAdd": false },
         // Remote access host: Tailscale address only; `deviceName` "" = the computer name.
         "remote": { "enabled": false, "port": 7813, "deviceName": "", "files": false, "audio": true },
         "relaunch": { "spacingSec": 9, "defaultDelaySec": 60, "checkInternet": true, "usePresence": false },
@@ -166,6 +166,13 @@ pub fn normalize(v: &Value) -> Value {
             _ => def.pointer("/friend/username").cloned().unwrap(),
         };
     }
+    if let Some(x) = out.pointer_mut("/friend/ownerUsername") {
+        // empty = off, so only a bad value (too long, not text) falls back to it
+        *x = match x.as_str().map(str::trim) {
+            Some(s) if s.chars().count() <= 32 => json!(s),
+            _ => json!(""),
+        };
+    }
     if let Some(x) = out.pointer_mut("/remote/deviceName") {
         *x = json!(crate::remote::clean_name(x.as_str().unwrap_or_default()));
     }
@@ -227,19 +234,18 @@ pub fn apply_patch(cur: &Value, patch: &Value) -> Result<Value, String> {
     }
     merge(&mut next, patch);
     let next = normalize(&next);
-    if next.pointer("/ws/port").is_some() && next.pointer("/ws/port") == next.pointer("/api/port") {
+    // Only a clash this patch creates counts: one already stored (an upgrade added a
+    // default port, or a hand-edited file) must not block unrelated saves.
+    let port = |k: &str| next.pointer(&format!("/{k}/port"));
+    let set = |k: &str| patch.pointer(&format!("/{k}/port")).is_some();
+    let clash = |a: &str, b: &str| port(a).is_some() && port(a) == port(b) && (set(a) || set(b));
+    if clash("ws", "api") {
         return Err("The control server and the local API need different ports.".into());
     }
-    let f = next.pointer("/friend/port");
-    if f.is_some() && (f == next.pointer("/ws/port") || f == next.pointer("/api/port")) {
+    if clash("friend", "ws") || clash("friend", "api") {
         return Err("The friend server needs its own port.".into());
     }
-    let r = next.pointer("/remote/port");
-    if r.is_some()
-        && ["/ws/port", "/api/port", "/friend/port"]
-            .iter()
-            .any(|p| next.pointer(p) == r)
-    {
+    if ["ws", "api", "friend"].iter().any(|k| clash("remote", k)) {
         return Err("Remote access needs its own port.".into());
     }
     Ok(next)
@@ -382,6 +388,14 @@ mod tests {
             let v = normalize(&json!({"friend": {"username": given}}));
             assert_eq!(at(&v, "/friend/username"), &json!(want));
         }
+        for (given, want) in [(" me ", "me"), ("  ", ""), (&*"x".repeat(33), "")] {
+            let v = normalize(&json!({"friend": {"ownerUsername": given}}));
+            assert_eq!(at(&v, "/friend/ownerUsername"), &json!(want));
+        }
+        assert_eq!(
+            at(&normalize(&json!({})), "/friend/ownerUsername"),
+            &json!("")
+        );
         assert_eq!(
             at(&normalize(&json!({})), "/launch/startMinimized"),
             &json!(false)
@@ -572,6 +586,12 @@ mod tests {
                 "{p}"
             );
         }
+        // A clash already stored (0.2.x ws.port 7812, then friend.port defaulted to 7812)
+        // blocks only port edits that keep it, not unrelated saves.
+        let stale = normalize(&json!({"ws":{"port":7812}}));
+        assert!(apply_patch(&stale, &json!({"theme":"light"})).is_ok());
+        assert!(apply_patch(&stale, &json!({"friend":{"port":7812}})).is_err());
+        assert!(apply_patch(&stale, &json!({"friend":{"port":7820}})).is_ok());
         assert!(apply_patch(&d, &json!({"fps":"x"})).is_err());
         assert!(apply_patch(&d, &json!({"client":{"customSettingsPath":5}})).is_err());
         assert!(apply_patch(&d, &json!({"client":{"customSettingsPath":"a"}})).is_ok());

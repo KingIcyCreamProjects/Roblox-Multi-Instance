@@ -14,6 +14,8 @@ const caps = (os: "windows" | "linux" | "macos") => ({
   windowRect: true,
   watcher: true,
   clientHelpers: true,
+  fullscreenWait: true,
+  audio: true,
 });
 
 test("tour steps through and Start playing marks it done", async () => {
@@ -159,12 +161,15 @@ test("tourSteps: first run shows every step for the OS; a seen list beats the le
     "remote",
     "def",
   ]);
-  expect(tourSteps(first, { ...caps("linux"), watcher: false })).toEqual([
+  // Linux (flags as in linux.rs): the watcher is on so it gets the friend step, but no client
+  // helpers so no perf step
+  const linux = { ...caps("linux"), cookieLock: false, windowRect: false, clientHelpers: false };
+  expect(tourSteps(first, { ...linux, fullscreenWait: false, audio: false })).toEqual([
     "welcome",
     "add",
     "pick",
-    "perf",
     "tabs",
+    "friend",
     "remote",
   ]);
   const seen = ["welcome", "add", "pick", "perf", "tabs", "friend", "remote", "homelab"];

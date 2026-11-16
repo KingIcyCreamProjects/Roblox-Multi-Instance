@@ -52,6 +52,7 @@ test("tiles: one tile per window, main first", () => {
 test("step 1: picking numbers accounts, unpicking renumbers", async () => {
   setup();
   expect(await screen.findByText("Pick your order")).toBeInTheDocument();
+  expect(screen.queryByText("Remembered for next time")).not.toBeInTheDocument();
   const user = userEvent.setup();
   const pickers = await screen.findAllByRole("button", { pressed: false });
   const names = pickers.slice(0, 3);
@@ -73,6 +74,7 @@ test("a saved order skips to step 2; Edit order goes back", async () => {
   expect(await screen.findByText("Pick a layout")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Edit order" }));
   expect(await screen.findByText("Pick your order")).toBeInTheDocument();
+  expect(screen.getByText("Remembered for next time")).toBeInTheDocument();
   expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(2);
 });
 

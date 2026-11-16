@@ -29,11 +29,14 @@ function PickOrder({
   running,
   order,
   setOrder,
+  remembered,
   onNext,
 }: {
   accounts: AccountView[];
   running: Set<string>;
   order: string[];
+  /** an order is already saved */
+  remembered: boolean;
   setOrder: (f: (o: string[]) => string[]) => void;
   onNext: () => void;
 }) {
@@ -89,7 +92,7 @@ function PickOrder({
         <Button variant="ghost" onClick={() => setOrder(() => [])} disabled={!order.length}>
           {t("grid.clear")}
         </Button>
-        <span className="text-12 text-text-3">{t("grid.remembered")}</span>
+        {remembered && <span className="text-12 text-text-3">{t("grid.remembered")}</span>}
         <span className="flex-1" />
         <Button variant="primary" onClick={onNext} disabled={!order.length}>
           {t("grid.next")}
@@ -174,7 +177,11 @@ function PickLayout({
   onDone: () => void;
 }) {
   const setSettings = useSetSettings();
-  const { data: suggestions = [], error: suggestErr } = useQuery({
+  const {
+    data: suggestions = [],
+    error: suggestErr,
+    isPlaceholderData,
+  } = useQuery({
     queryKey: ["grid_suggest", count],
     queryFn: () => call("grid_suggest", { count }),
     placeholderData: keepPreviousData, // no blank flash when the window count settles
@@ -291,7 +298,8 @@ function PickLayout({
           variant="primary"
           onClick={() => arrange.mutate()}
           // before monitors load, the saved monitor would be overwritten with null
-          disabled={!layout || !monitorsReady || arrange.isPending}
+          // placeholder suggestions were built for the previous window count
+          disabled={!layout || !monitorsReady || isPlaceholderData || arrange.isPending}
         >
           <Grid2X2 size={16} strokeWidth={1.75} aria-hidden />
           {t("grid.go")}
@@ -380,6 +388,7 @@ function Wizard({
           running={running}
           order={order}
           setOrder={setOrder}
+          remembered={!!saved?.order?.length}
           onNext={() => {
             setSettings.mutate({ gridArrange: { order } });
             setStep(2);

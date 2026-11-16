@@ -471,7 +471,7 @@ test("on macOS a Windows-only control says it is not on macOS, not 'not availabl
 test("on Linux without Sober, launch-gated rows show the Install Sober reason", async () => {
   const user = userEvent.setup();
   const why = "Install Sober (org.vinegarhq.Sober) to launch Roblox on Linux.";
-  Object.assign(mockCaps, { os: "linux", launch: false, launchReason: why });
+  Object.assign(mockCaps, { os: "linux", launch: false, launchReason: why, clientHelpers: false });
   setup();
   await tab(user, "roblox");
   expect(await screen.findByRole("switch", { name: t("set.fps.unlock") })).toBeDisabled();
@@ -580,4 +580,12 @@ test("an install already running keeps the button disabled and says why", async 
   expect(screen.getByRole("button", { name: t("settings.updateInstall") })).toBeDisabled();
   vi.restoreAllMocks();
   mockUpdate.version = null;
+});
+
+test("a jump to a friend row lands on its section while the setup gate hides the row", async () => {
+  useUi.setState({ settingsJump: "friend.enabled" });
+  setup();
+  await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+  const el = scrollIntoView.mock.instances[0] as HTMLElement;
+  expect(el.getAttribute("data-sub")).toBe("friend");
 });

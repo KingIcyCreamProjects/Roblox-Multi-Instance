@@ -166,8 +166,8 @@ pub fn rejoin(reason: u32, unlocked: bool, hist: &mut Vec<i64>, now: i64) -> Rej
     if hist.len() >= REJOIN_MAX {
         return Rejoin::Skip("rejoined too often in the last hour");
     }
-    // 264/273/276: the account joined from somewhere else; back off longer each time.
-    let delay_s = if matches!(reason, 264 | 273 | 276) {
+    // The account joined from somewhere else; back off longer each time.
+    let delay_s = if joined_elsewhere(reason) {
         60 << hist.len()
     } else {
         5
@@ -176,6 +176,18 @@ pub fn rejoin(reason: u32, unlocked: bool, hist: &mut Vec<i64>, now: i64) -> Rej
         delay_s,
         same_server: hist.is_empty(),
     }
+}
+
+/// 264/273/276: the account joined from somewhere else (another device or app).
+fn joined_elsewhere(reason: u32) -> bool {
+    matches!(reason, 264 | 273 | 276)
+}
+
+/// Keep a `Skip`ped disconnect to retry later? Locked: yes, until unlocked. Rate limit: yes,
+/// until the hour frees up; except when the account joined from somewhere else, so it never
+/// keeps kicking whoever plays it there.
+pub fn keep_skipped(reason: u32, unlocked: bool) -> bool {
+    !unlocked || !joined_elsewhere(reason)
 }
 
 #[cfg(test)]
@@ -378,6 +390,16 @@ mod tests {
             go(5, false),
             "oldest aged out"
         );
+    }
+
+    /// A rate-limited disconnect is retried once the hour frees up (not dropped), except
+    /// when the account joined from elsewhere.
+    #[test]
+    fn skipped_disconnect_kept_for_later() {
+        assert!(keep_skipped(277, true));
+        assert!(keep_skipped(273, false), "locked: kept until unlocked");
+        assert!(!keep_skipped(273, true));
+        assert!(!keep_skipped(264, true) && !keep_skipped(276, true));
     }
 
     #[test]

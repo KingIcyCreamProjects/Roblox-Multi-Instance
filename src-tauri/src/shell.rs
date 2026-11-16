@@ -100,6 +100,17 @@ fn flag(app: &AppHandle, ptr: &str) -> bool {
     s.pointer(ptr) == Some(&Value::Bool(true))
 }
 
+/// One-shot "an update is being installed" flag: the relaunched app shows its window even
+/// when this session began with `--autostart`.
+const JUST_INSTALLED: &str = "/updates/justInstalled";
+
+fn just_installed(app: &AppHandle, on: bool) {
+    let st = app.state::<AppState>();
+    if let Err(e) = crate::commands::persist(&st, &json!({ "updates": { "justInstalled": on } })) {
+        log::warn!("update restart flag not saved: {e}");
+    }
+}
+
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let st = app.state::<AppState>();
     let recents = crate::launch::recents::list(&crate::launch::launcher::library(&st), MAX_ITEMS);
@@ -366,8 +377,17 @@ pub fn init(app: &AppHandle) {
             tauri::async_runtime::spawn_blocking(move || refresh(&h));
         });
     }
+    // The page asks for the window when a tray play has nothing to launch, so its toast is seen.
+    let h = app.clone();
+    app.listen_any("tray://show", move |_| show_main(&h));
     // The window is created hidden (no flash at login); show it unless starting in the tray.
-    let minimized = std::env::args().any(|a| a == AUTOSTART_ARG) && flag(app, "/startup/minimized");
+    // The relaunch after an update keeps argv, so a login session would come back hidden.
+    let updated = flag(app, JUST_INSTALLED);
+    if updated {
+        just_installed(app, false);
+    }
+    let minimized =
+        !updated && std::env::args().any(|a| a == AUTOSTART_ARG) && flag(app, "/startup/minimized");
     if !minimized || app.tray_by_id(TRAY).is_none() {
         show_main(app);
         if minimized {
@@ -411,8 +431,16 @@ fn portable(app: &AppHandle) -> CmdResult<()> {
 async fn check(app: &AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_updater::UpdaterExt;
     portable(app)?;
+    // The plugin sets no timeout: a stalled connection would hang the check, or hold the
+    // install slot (and block Automation start) for the whole session. Idle limits, not a
+    // total one, so a slow but moving download still finishes. The found Update keeps them.
     let u = app
-        .updater()
+        .updater_builder()
+        .configure_client(|b| {
+            b.connect_timeout(std::time::Duration::from_secs(15))
+                .read_timeout(std::time::Duration::from_secs(30))
+        })
+        .build()
         .map_err(|e| e.to_string())?
         .check()
         .await
@@ -480,7 +508,10 @@ pub async fn update_install(app: AppHandle) -> CmdResult<()> {
     // Windows exits inside `install` (no RunEvent::Exit): stop background work first, but keep
     // the vault open so a failure still shows in Settings. Elsewhere restart() -> Exit -> shutdown.
     let was_running = cfg!(windows) && pause(&app).await;
+    // Set before install: Windows relaunches from inside it.
+    just_installed(&app, true);
     if let Err(e) = u.install(bytes) {
+        just_installed(&app, false);
         if cfg!(windows) {
             resume(&app, was_running).await;
         }

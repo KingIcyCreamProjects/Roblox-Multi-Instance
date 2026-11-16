@@ -26,6 +26,11 @@ function Harness() {
   return <Toaster />;
 }
 
+// the token rows only show once Automation is on
+beforeEach(async () => {
+  await ipc.call("settings_set", { patch: { automation: { enabled: true } } });
+});
+
 const wrap = (ui: React.ReactNode) =>
   render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
 
@@ -77,6 +82,16 @@ test("dynamic controls render by kind and fire automation_ui_event", async () =>
     name: "Speed",
     value: 20,
   });
+  spy.mockRestore();
+});
+
+test("no token rows while Automation is off: the token then is a throwaway", async () => {
+  await ipc.call("settings_set", { patch: { automation: { enabled: false } } });
+  const spy = vi.spyOn(ipc, "call");
+  wrap(<TokenRows />);
+  await new Promise((r) => setTimeout(r, 50));
+  expect(screen.queryByText(t("settings.token"))).toBeNull();
+  expect(spy.mock.calls.some(([c]) => c === "automation_token")).toBe(false);
   spy.mockRestore();
 });
 
@@ -325,7 +340,7 @@ test("relaunch delay sends nothing for a blank or unchanged value", async () => 
   spy.mockRestore();
 });
 
-test("relaunch toggle falls back to 60 s and drops a non-positive place or non-string job id", async () => {
+test("relaunch toggle sends no delay (the account keeps the Settings default) and drops a non-positive place or non-string job id", async () => {
   const spy = vi.spyOn(ipc, "call").mockResolvedValue(null);
   const u = userEvent.setup();
   wrap(<RelaunchSwitch a={acct({ relaunch: { placeId: 0, jobId: 7 } })} />);
@@ -333,7 +348,7 @@ test("relaunch toggle falls back to 60 s and drops a non-positive place or non-s
   expect(spy).toHaveBeenLastCalledWith("automation_relaunch_set", {
     account: "Bob",
     enabled: true,
-    delaySec: 60,
+    delaySec: undefined,
     placeId: null,
     jobId: null,
   });

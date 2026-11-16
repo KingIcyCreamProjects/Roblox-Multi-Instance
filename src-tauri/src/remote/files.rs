@@ -26,7 +26,9 @@ const GOT_EVERY: u64 = 1024 * 1024;
 pub const MAX_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_XFERS: usize = 2;
 const MAX_ENTRIES: usize = 2000;
-/// Characters kept of an uploaded file's name (extension included).
+/// UTF-8 bytes kept of an uploaded file's name (extension included). File systems cap a name
+/// at 255 bytes (Linux, macOS) or 255 UTF-16 units (Windows, never more than the UTF-8 bytes),
+/// so this leaves room for " (n)" and ".part".
 const NAME_MAX: usize = 150;
 const LOG_FILES: usize = 100;
 
@@ -89,16 +91,17 @@ fn note(log: &Mutex<Vec<FileLog>>, f: FileLog) {
 
 /// A full path on this computer. Network (`\\host\share`) and device (`\\.\`) paths are
 /// refused: opening one would make this PC sign in to whatever server the viewer names.
+/// On Windows only drive paths (`C:\`, `\\?\C:\`) pass: any other verbatim form, such as
+/// `\\?\GLOBALROOT\Device\Mup\...`, can reach the network or a device.
 pub fn local_abs(p: &Path) -> bool {
     use std::path::{Component, Prefix};
     p.is_absolute()
-        && !matches!(
-            p.components().next(),
-            Some(Component::Prefix(x)) if matches!(
-                x.kind(),
-                Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
-            )
-        )
+        && match p.components().next() {
+            Some(Component::Prefix(x)) => {
+                matches!(x.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+            }
+            _ => true,
+        }
 }
 
 fn io_err(e: &std::io::Error) -> String {
@@ -133,7 +136,7 @@ fn split_ext(s: &str) -> (&str, &str) {
 }
 
 /// An uploaded file's name as saved: base name only, no separators or characters Windows
-/// refuses, no device names, no trailing dots or spaces, at most `NAME_MAX` characters.
+/// refuses, no device names, no trailing dots or spaces, at most `NAME_MAX` bytes.
 pub fn safe_name(raw: &str) -> String {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or_default();
     let s: String = base
@@ -142,8 +145,11 @@ pub fn safe_name(raw: &str) -> String {
         .collect();
     let s = s.trim().trim_end_matches(['.', ' ']);
     let (stem, ext) = split_ext(s);
-    let keep = NAME_MAX.saturating_sub(ext.chars().count());
-    let stem: String = stem.chars().take(keep).collect();
+    let mut keep = NAME_MAX.saturating_sub(ext.len()).min(stem.len());
+    while !stem.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    let stem = &stem[..keep];
     let stem = stem.trim_end_matches(['.', ' ']);
     let first = stem.split('.').next().unwrap_or_default();
     let name = if reserved(first) {
@@ -340,12 +346,16 @@ impl Files {
                         },
                     );
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = download(&path, id, &c, &a, &bulk, &log) {
-                            if !c.load(SeqCst) {
-                                let _ = bulk.blocking_send(file_msg(id, json!({ "err": e })));
-                            }
-                        }
+                        let r = download(&path, id, &c, &a, &bulk, &log);
+                        // the slot is free before the last message: the viewer may start
+                        // its next transfer as soon as it reads it
                         done();
+                        let last = match r {
+                            Ok(()) => json!({ "done": true }),
+                            Err(_) if c.load(SeqCst) => return,
+                            Err(e) => json!({ "err": e }),
+                        };
+                        let _ = bulk.blocking_send(file_msg(id, last));
                     });
                 } else {
                     let size = v["size"].as_u64().unwrap_or(u64::MAX);
@@ -366,11 +376,22 @@ impl Files {
                     );
                     tokio::task::spawn_blocking(move || {
                         let r = upload(dir, &name, size, id, rx, &q, &out, &log);
-                        // a cancel or a dropped session says nothing more
-                        if let Err(Some(e)) = r {
-                            let _ = out.blocking_send(file_msg(id, json!({ "err": e })));
-                        }
+                        // the slot is free before the last message (see the download)
                         done();
+                        match r {
+                            Ok((got, shown)) => {
+                                let _ = out.blocking_send(file_msg(id, json!({ "got": got })));
+                                let _ = out.blocking_send(file_msg(
+                                    id,
+                                    json!({ "done": true, "path": shown }),
+                                ));
+                            }
+                            Err(Some(e)) => {
+                                let _ = out.blocking_send(file_msg(id, json!({ "err": e })));
+                            }
+                            // a cancel or a dropped session says nothing more
+                            Err(None) => {}
+                        }
                     });
                 }
                 true
@@ -507,12 +528,13 @@ fn download(
     if sent < size {
         return Err("The file got shorter while it was being sent.".into());
     }
-    bulk.blocking_send(msg(json!({ "done": true })))
-        .map_err(gone)
+    // the caller sends `done` once the slot is free
+    Ok(())
 }
 
 /// `Err(None)`: cancelled or the session ended (nothing to say). The partial file is
-/// deleted on every error.
+/// deleted on every error. `Ok`: (bytes received, saved path) for the final `got` and
+/// `done` the caller sends once the slot is free.
 #[allow(clippy::too_many_arguments)]
 fn upload(
     dir: Option<PathBuf>,
@@ -523,7 +545,7 @@ fn upload(
     queued: &AtomicU64,
     out: &mpsc::Sender<Message>,
     log: &Mutex<Vec<FileLog>>,
-) -> Result<(), Option<String>> {
+) -> Result<(u64, String), Option<String>> {
     let dir = dir.ok_or_else(|| Some("This computer has no Downloads folder.".to_owned()))?;
     fs::create_dir_all(&dir).map_err(|e| Some(io_err(&e)))?;
     // written as `<name>.part`: a quit or crash never leaves a partial file under the real name
@@ -596,10 +618,7 @@ fn upload(
             e.name = final_name;
         }
     }
-    let shown = path.to_string_lossy();
-    let _ = out.blocking_send(file_msg(id, json!({ "got": got })));
-    let _ = out.blocking_send(file_msg(id, json!({ "done": true, "path": shown })));
-    Ok(())
+    Ok((got, path.to_string_lossy().into_owned()))
 }
 
 #[cfg(test)]

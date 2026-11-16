@@ -100,7 +100,16 @@ test("join link and percent formats", () => {
   expect(fmtPct(1)).toBe("100%");
 });
 
-test("rate limit holds for the longest announced wait, then clears", async () => {
+test("rate limit holds for the longest announced wait, then clears", () => {
+  vi.useFakeTimers();
+  try {
+    rateLimitHolds();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+function rateLimitHolds() {
   const { result } = renderHook(() => useRateLimited());
   const announce = (retryInMs: number) =>
     act(
@@ -114,10 +123,11 @@ test("rate limit holds for the longest announced wait, then clears", async () =>
   announce(300);
   announce(30); // a shorter wait must not cut the 300 ms one short
   expect(result.current).toBe(true);
-  await new Promise((r) => setTimeout(r, 100));
+  act(() => void vi.advanceTimersByTime(100));
   expect(result.current).toBe(true);
-  await waitFor(() => expect(result.current).toBe(false), { timeout: 1000 });
-});
+  act(() => void vi.advanceTimersByTime(250));
+  expect(result.current).toBe(false);
+}
 
 function Strip() {
   const rove = useRoving(3);

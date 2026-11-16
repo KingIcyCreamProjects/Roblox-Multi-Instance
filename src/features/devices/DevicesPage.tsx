@@ -8,7 +8,7 @@ import { openExternal } from "@/lib/events";
 import { call, errMessage, type RemoteConnect, type RemotePeer, type RemotePeers } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
 import { inputCls, listRowCls } from "@/features/settings/controls";
-import { Step } from "@/features/settings/FriendSetup";
+import { OS_KEY, Step } from "@/features/settings/FriendSetup";
 import { RemoteSession } from "./RemoteSession";
 
 const DOWNLOAD = "https://tailscale.com/download";
@@ -57,7 +57,7 @@ function TailscaleGate({ st, os }: { st: RemotePeers; os: string | undefined }) 
           n={2}
           state={st.installed ? "current" : "upcoming"}
           title={t("fs.step2")}
-          desc={t(os === "windows" ? "fs.step2.win" : "fs.step2.mac")}
+          desc={t(OS_KEY[os === "macos" || os === "linux" ? os : "windows"])}
         />
       </ol>
     </div>
@@ -309,7 +309,10 @@ export function DevicesPage() {
                           sm
                           variant="primary"
                           aria-label={t("dev.pairTitle", { name: label(p) })}
-                          onClick={() => setPairing(p)}
+                          onClick={() => {
+                            setMsg(null); // an old "Pair again" must not outlive the new pairing
+                            setPairing(p);
+                          }}
                         >
                           {t("dev.pair")}
                         </Button>

@@ -132,6 +132,7 @@ impl Platform for MacOs {
             window_rect: true,
             watcher: true,
             client_helpers: true,
+            ..Default::default()
         }
     }
 
@@ -398,7 +399,9 @@ pub mod ax {
     use std::ffi::c_void;
 
     pub const NOT_TRUSTED: &str =
-        "Allow RMI in System Settings > Privacy & Security > Accessibility, then try again.";
+        "Allow RMI in System Settings > Privacy & Security > Accessibility, then try again. \
+         If RMI is already listed and on (common after an update), remove it with the minus \
+         button and add it again.";
 
     #[repr(C)]
     #[derive(Default, Clone, Copy)]

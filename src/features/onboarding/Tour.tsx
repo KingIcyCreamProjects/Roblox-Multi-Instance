@@ -329,9 +329,10 @@ function allSteps(caps: Capabilities): Step[] {
     "welcome",
     "add",
     "pick",
-    "perf",
+    // nothing writes FPS or graphics settings without client helpers (Linux)
+    ...(caps.clientHelpers ? (["perf"] as const) : []),
     "tabs",
-    // the friend remote needs process tracking (none on Linux)
+    // the friend remote needs process tracking
     ...(caps.watcher ? (["friend"] as const) : []),
     "remote",
     ...(caps.os === "windows" ? (["def"] as const) : []),

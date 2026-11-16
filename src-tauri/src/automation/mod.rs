@@ -86,18 +86,24 @@ pub trait Backend: Send + Sync + 'static {
     /// Secret family.
     async fn cookie(&self, name: &str) -> ApiResult<String>;
     /// Friend remote (`crate::friend`): `id` is an account id; only `friend_allowed` ones.
-    async fn friend_list(&self) -> ApiResult<Vec<crate::friend::FriendAccount>> {
+    /// `owner`: the owner's own login, which gets every account.
+    async fn friend_list(&self, _owner: bool) -> ApiResult<Vec<crate::friend::FriendAccount>> {
         Err(crate::friend::not_found())
     }
-    async fn friend_disconnect(&self, _id: &str) -> ApiResult<()> {
+    async fn friend_disconnect(&self, _id: &str, _owner: bool) -> ApiResult<()> {
         Err(crate::friend::not_found())
     }
     /// Batch id.
-    async fn friend_reconnect(&self, _id: &str, _link: Option<String>) -> ApiResult<String> {
+    async fn friend_reconnect(
+        &self,
+        _id: &str,
+        _link: Option<String>,
+        _owner: bool,
+    ) -> ApiResult<String> {
         Err(crate::friend::not_found())
     }
     /// PNG bytes of the cached 48 px headshot.
-    async fn friend_avatar(&self, _id: &str) -> ApiResult<Vec<u8>> {
+    async fn friend_avatar(&self, _id: &str, _owner: bool) -> ApiResult<Vec<u8>> {
         Err(crate::friend::not_found())
     }
     /// Friend add (Quick Log In): accounts the friend added (`friend::locked` when locked).
@@ -743,14 +749,23 @@ mod tests {
     async fn port_change_rebinds_both_and_quick_restart_works() {
         let a = testkit::automation(serde_json::json!({}));
         a.start().await.unwrap();
-        let p = free_port();
-        a.ctx.settings.lock().unwrap()["ws"]["port"] = serde_json::json!(p);
-        a.reconcile().await.unwrap();
+        // A parallel test can grab a picked port before we bind it: pick again (both ports).
+        let mut p = 0;
+        for _ in 0..5 {
+            p = free_port();
+            {
+                let mut s = a.ctx.settings.lock().unwrap();
+                s["ws"]["port"] = serde_json::json!(p);
+                s["api"]["port"] = serde_json::json!(free_port());
+            }
+            if a.reconcile().await.is_ok() {
+                break;
+            }
+        }
         let s = a.status().await;
         assert!(s.ws_running && s.api_running, "{s:?}");
         assert_eq!(s.ws_port, p);
         // Same fixed ports: stop then start must rebind immediately.
-        a.ctx.settings.lock().unwrap()["api"]["port"] = serde_json::json!(free_port());
         for _ in 0..3 {
             a.stop().await;
             let s = a.start().await.unwrap();
