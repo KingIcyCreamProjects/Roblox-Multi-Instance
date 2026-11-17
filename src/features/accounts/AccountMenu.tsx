@@ -6,6 +6,7 @@ import { useRef, type ReactNode } from "react";
 import { useSettings } from "@/app/useSettings";
 import { useUi, type FocusField } from "@/app/store";
 import { toast } from "@/components/Toasts";
+import { runHere, useElsewhere, useMoving } from "@/features/devices/elsewhere";
 import { openSite } from "./openSite";
 import { targetFromBar, usePlayBar } from "@/features/playbar/store";
 import { usePlay } from "@/features/playbar/usePlay";
@@ -86,6 +87,9 @@ function Items({ M, a, ids }: { M: M; a: AccountView; ids: string[] }) {
   const targets = list?.accounts.filter((x) => ids.includes(x.id)) ?? [a];
   const allPinned = targets.every((x) => x.pinned);
   const dev = !!s?.dev.enabled;
+  const where = useElsewhere();
+  const away = targets.filter((x) => x.userId !== null && where.has(x.userId));
+  const moving = useMoving((m) => away.some((x) => m.ids.includes(x.id)));
 
   const focus = (field: FocusField) => {
     ui.setSel({ ids: [a.id], anchor: a.id, cursor: a.id });
@@ -114,6 +118,15 @@ function Items({ M, a, ids }: { M: M; a: AccountView; ids: string[] }) {
 
   return (
     <>
+      {away.length > 0 && (
+        <M.Item className={item} disabled={moving} onSelect={() => void runHere(away)}>
+          {moving
+            ? t("elsewhere.moving")
+            : away.length === 1
+              ? t("elsewhere.runHere")
+              : t("elsewhere.runNHere", { n: away.length })}
+        </M.Item>
+      )}
       <M.Item className={item} onSelect={() => play(ids)}>
         {single ? t("menu.play") : t("playbar.playN", { n: ids.length })}
       </M.Item>

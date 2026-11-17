@@ -10,6 +10,7 @@ import { ServerPick } from "@/features/playbar/ServerPick";
 import { Chip } from "@/features/playbar/DestChip";
 import { targetFromBar, usePlayBar } from "@/features/playbar/store";
 import { usePlay } from "@/features/playbar/usePlay";
+import { runHere, useElsewhere, useMoving } from "@/features/devices/elsewhere";
 import { toast } from "@/components/Toasts";
 import {
   call,
@@ -702,6 +703,8 @@ function Single({
   const save = (patch: AccountPatch) => void act.update(a.id, patch);
   const state = a.presence?.state ?? "offline";
   const game = state === "in_game" ? a.presence?.gameName : null;
+  const where = useElsewhere().get(a.userId ?? NaN);
+  const moving = useMoving((m) => m.ids.includes(a.id));
   const own = a.launchTarget;
   const fromGroup = destText(groupTarget, useDestName(groupTarget));
   // F2 / "Edit alias" from the list: open More so the field exists to be focused
@@ -731,6 +734,11 @@ function Single({
             {game ? ` · ${game}` : ""}
           </span>
         </p>
+        {where && (
+          <p className="mt-0.5 truncate text-12 text-text-3">
+            {t("elsewhere.runningOn", { device: where.device })}
+          </p>
+        )}
       </div>
       {divider}
       <DestEditor
@@ -785,6 +793,11 @@ function Single({
               {/* same words as the Play bar: no game anywhere opens Roblox's home screen */}
               {t(own || groupTarget || barDest ? "menu.play" : "playbar.home")}
             </Button>
+            {where && (
+              <Button disabled={moving} onClick={() => void runHere([a])}>
+                {t(moving ? "elsewhere.moving" : "elsewhere.runHere")}
+              </Button>
+            )}
             <Button onClick={() => openSite(a.id)}>
               <Globe size={14} strokeWidth={1.75} />
               {t("inspector.openSite")}
@@ -886,6 +899,9 @@ function Multi({
   const ids = picked.map((a) => a.id);
   const sameGroup = picked.every((a) => a.group === picked[0].group) ? picked[0].group : null;
   const sameColor = picked.every((a) => a.color === picked[0].color) ? picked[0].color : undefined;
+  const where = useElsewhere();
+  const away = picked.filter((a) => a.userId !== null && where.has(a.userId));
+  const moving = useMoving((m) => away.some((a) => m.ids.includes(a.id)));
   return (
     <div className="flex flex-col gap-5 p-[1.375rem]">
       <div className="flex items-center pl-3">
@@ -912,6 +928,11 @@ function Multi({
           <Play size={14} strokeWidth={2.25} fill="currentColor" />
           {home ? t("playbar.homeN", { n: picked.length }) : t("inspector.playAll")}
         </Button>
+        {away.length > 0 && (
+          <Button disabled={moving} onClick={() => void runHere(away)}>
+            {moving ? t("elsewhere.moving") : t("elsewhere.runNHere", { n: away.length })}
+          </Button>
+        )}
         <Button onClick={() => useUi.setState({ toolsOpen: true })}>
           <Wrench size={14} strokeWidth={1.75} />
           {t("inspector.tools")}

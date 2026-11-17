@@ -168,39 +168,53 @@ fn cached_keys(st: &AppState) -> Keys {
     keys
 }
 
+/// The report body: this computer's name and the user ids with a client here. `None` while
+/// locked. Blocking.
+fn report_body(st: &AppState) -> Option<Value> {
+    let ids = super::handover::running_ids(st)?;
+    Some(json!({ "name": st.remote.device_name(), "userIds": ids, "canHandOver": true }))
+}
+
+/// One report to `ip`: its answer (`{}` from an older RMI), `None` on any failure.
+async fn report(c: &reqwest::Client, ip: &str, port: u16, k: &Key, body: &Value) -> Option<Value> {
+    let r = c
+        .post(format!("http://{ip}:{port}/v1/remote/running"))
+        .bearer_auth(&k.token)
+        .json(body)
+        .send()
+        .await
+        .ok()?;
+    r.error_for_status().ok()?.json().await.ok()
+}
+
+/// Keeps what `ip` says it runs (an older RMI says nothing).
+fn note_answer(app: &tauri::AppHandle, ip: &str, k: &Key, v: &Value) {
+    let Ok(ids) = serde_json::from_value::<Vec<u64>>(v["userIds"].clone()) else {
+        return;
+    };
+    let name = Some(clean_name(v["name"].as_str().unwrap_or_default()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| k.name.clone());
+    app.state::<AppState>().remote.note_host(ip, &name, ids);
+}
+
 /// Tell every computer this one is paired with which Roblox accounts (user ids) have a client
-/// here, so that computer's friend page can name this one. Sent only to computers the owner
+/// here, so that computer's friend page can name this one; its answer says the same of it and
+/// may ask this one to let accounts go (Run here there). Sent only to computers the owner
 /// paired this one with; a locked vault sends nothing.
 /// ponytail: one small POST per paired computer every `PUSH_EVERY`, changed or not; send on
 /// change only if that ever shows up as load.
 pub async fn push_running(app: &tauri::AppHandle) {
     let found = blocking(app, |st| {
         // The vault first (a cheap lock): a locked app never asks the OS secret store.
-        let accs: Vec<(u64, String)> = {
-            let g = st
-                .vault
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(v) = g.as_ref() else {
-                return Ok(None);
-            };
-            let all = v.payload().accounts.iter();
-            all.filter_map(|a| Some((a.user_id?, a.tracker_id.clone())))
-                .collect()
-        };
+        if crate::commands::guard(&st.vault).is_none() {
+            return Ok(None);
+        }
         let keys = cached_keys(st);
         if keys.is_empty() {
             return Ok(None);
         }
-        let trackers: Vec<String> = accs.iter().map(|a| a.1.clone()).collect();
-        let live = st.platform.tracked_clients(&trackers);
-        let ids: Vec<u64> = accs
-            .iter()
-            .filter(|(_, t)| live.iter().any(|(_, l)| l == t))
-            .map(|(u, _)| *u)
-            .collect();
-        let body = json!({ "name": st.remote.device_name(), "userIds": ids });
-        Ok(Some((keys, body, st.remote.port())))
+        Ok(report_body(st).map(|b| (keys, b, st.remote.port())))
     })
     .await;
     let (Ok(Some((keys, body, port))), Ok(c)) = (found, client()) else {
@@ -209,12 +223,62 @@ pub async fn push_running(app: &tauri::AppHandle) {
     // All at once: computers that are off must not delay the report to the ones that are on.
     // An older RMI (404), a computer that is off or no longer paired: try again next time.
     let sends = keys.iter().map(|(ip, k)| {
-        c.post(format!("http://{ip}:{port}/v1/remote/running"))
-            .bearer_auth(&k.token)
-            .json(&body)
-            .send()
+        let (c, body) = (&c, &body);
+        async move {
+            let v = report(c, ip, port, k, body).await?;
+            note_answer(app, ip, k, &v);
+            let mut want: Vec<u64> = serde_json::from_value(v["handover"].clone()).ok()?;
+            want.truncate(super::MAX_RUNNING);
+            if want.is_empty() {
+                return Some(());
+            }
+            // Released here, then one more report right away so that computer sees them gone.
+            let body = blocking(app, move |st| {
+                super::handover::release(st, &want);
+                Ok(report_body(st))
+            })
+            .await
+            .ok()??;
+            let v = report(c, ip, port, k, &body).await?;
+            note_answer(app, ip, k, &v);
+            Some(())
+        }
     });
     futures_util::future::join_all(sends).await;
+}
+
+/// Run here, direct: asks `ip` (this one holds its token) to close `ids`; the ids it let go.
+pub(super) async fn hand_over(
+    app: &tauri::AppHandle,
+    ip: String,
+    name: String,
+    ids: Vec<u64>,
+) -> Result<Vec<u64>, String> {
+    let unreachable = || format!("Could not reach {name}.");
+    let k = ip.clone();
+    let key = blocking(app, move |st| Ok(cached_keys(st).remove(&k)))
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(unreachable)?;
+    let port = app.state::<AppState>().remote.port();
+    let r = client()?
+        .post(format!("http://{ip}:{port}/v1/remote/handover"))
+        .timeout(super::HANDOVER_WAIT) // closing clients takes a few seconds
+        .bearer_auth(&key.token)
+        .json(&json!({ "userIds": ids }))
+        .send()
+        .await
+        .map_err(|_| unreachable())?;
+    match r.status().as_u16() {
+        200 => {
+            let v: Value = r.json().await.map_err(|_| unreachable())?;
+            serde_json::from_value(v["released"].clone()).map_err(|_| unreachable())
+        }
+        404 => Err(format!("Update RMI on {name} first.")),
+        409 => Err(format!("RMI is locked on {name}.")),
+        _ => Err(unreachable()),
+    }
 }
 
 /// Blocking.

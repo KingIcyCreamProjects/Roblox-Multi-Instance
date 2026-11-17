@@ -155,7 +155,7 @@ export function launchBlocked(qc: QueryClient): string | null {
   return why;
 }
 
-const play: Play = (ids, opts) => {
+export const play: Play = (ids, opts) => {
   if (!ids.length) return;
   // every entry point (row, Enter, menus, inspector, hero, tray), not just the Play bar
   const why = launchBlocked(queryClient);

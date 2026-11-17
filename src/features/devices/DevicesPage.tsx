@@ -9,6 +9,8 @@ import { call, errMessage, type RemoteConnect, type RemotePeer, type RemotePeers
 import { t, type MsgKey } from "@/lib/i18n";
 import { inputCls, listRowCls } from "@/features/settings/controls";
 import { OS_KEY, Step } from "@/features/settings/FriendSetup";
+import { useAccounts } from "@/features/accounts/useAccounts";
+import { runHere, useElsewhere, useMoving } from "./elsewhere";
 import { RemoteSession } from "./RemoteSession";
 
 const DOWNLOAD = "https://tailscale.com/download";
@@ -182,6 +184,12 @@ export function DevicesPage() {
   const fail = (e: unknown) => setMsg(errMessage(e));
   const done = () => void qc.invalidateQueries({ queryKey: ["remotePeers"] });
   const label = (p: RemotePeer) => p.rmi ?? p.name;
+  const where = useElsewhere();
+  const { data: list } = useAccounts();
+  const moving = useMoving((m) => m.ids);
+  /** This computer's accounts that run on `p` right now. */
+  const there = (p: RemotePeer) =>
+    list?.accounts.filter((a) => a.userId !== null && where.get(a.userId)?.ip === p.ip) ?? [];
 
   const connect = (p: RemotePeer) => {
     if (connecting || conn) return;
@@ -279,7 +287,17 @@ export function DevicesPage() {
                 <>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-14 text-text-1">{label(p)}</p>
-                    <p className="text-13 text-text-3">{t(statusKey(p))}</p>
+                    <p id={`peer-${p.ip}`} className="text-13 text-text-3">
+                      {t(statusKey(p))}
+                      {p.paired && there(p).length > 0 && (
+                        <>
+                          {" · "}
+                          {there(p).length === 1
+                            ? t("elsewhere.countOne")
+                            : t("elsewhere.count", { n: there(p).length })}
+                        </>
+                      )}
+                    </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {p.paired ? (
@@ -292,6 +310,18 @@ export function DevicesPage() {
                         >
                           {t("dev.remove")}
                         </Button>
+                        {there(p).length > 0 && (
+                          <Button
+                            sm
+                            aria-describedby={`peer-${p.ip}`}
+                            disabled={there(p).some((a) => moving.includes(a.id))}
+                            onClick={() => void runHere(there(p))}
+                          >
+                            {there(p).some((a) => moving.includes(a.id))
+                              ? t("elsewhere.moving")
+                              : t("elsewhere.runAllHere")}
+                          </Button>
+                        )}
                         <Button
                           sm
                           variant="primary"

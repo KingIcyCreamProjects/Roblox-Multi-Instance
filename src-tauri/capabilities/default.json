@@ -127,6 +127,8 @@
     "allow-remote-pair",
     "allow-remote-connect",
     "allow-remote-forget",
+    "allow-remote-elsewhere",
+    "allow-remote-run-here",
     "allow-homelab-latest",
     "allow-homelab-download",
     "allow-tool-block",

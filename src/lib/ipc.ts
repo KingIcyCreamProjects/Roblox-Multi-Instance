@@ -171,6 +171,8 @@ export type RemotePeer = {
   /** Someone is connected to it right now. */
   busy: boolean;
 };
+/** An account a paired computer runs right now (by Roblox user id). */
+export type Elsewhere = { userId: number; device: string; ip: string };
 export type RemotePeers = { installed: boolean; running: boolean; peers: RemotePeer[] };
 /** `token` is secret: the viewer sends it as the socket's first message. */
 export type RemoteConnect = { url: string; token: string; name: string };
@@ -592,6 +594,10 @@ type Commands = {
   remote_pair: [{ ip: string; code: string }, string];
   remote_connect: [{ ip: string }, RemoteConnect];
   remote_forget: [{ ip: string }, void];
+  remote_elsewhere: [Record<string, never>, Elsewhere[]];
+  /** Asks the paired computers to close these accounts' clients; resolves with the user ids
+   * now free to launch here. Can take up to 40 s. Rejects with a sentence when none were. */
+  remote_run_here: [{ userIds: number[] }, number[]];
   /** Secret: the friend password. */
   friend_password: [Record<string, never>, string];
   friend_password_copy: [Record<string, never>, void];

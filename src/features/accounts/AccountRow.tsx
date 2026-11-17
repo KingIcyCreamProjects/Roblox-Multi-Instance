@@ -3,6 +3,8 @@ import { useSortable } from "@dnd-kit/sortable";
 import clsx from "clsx";
 import { Folder, FolderOpen, GripVertical, Pin } from "lucide-react";
 import { memo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
+import { Button } from "@/components/ui/Button";
+import { runHere, useElsewhere, useMoving } from "@/features/devices/elsewhere";
 import { fileSrc, type AccountView, type LaunchTarget, type PresenceState } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
 import { DestLabel } from "./DestLabel";
@@ -133,6 +135,9 @@ export const AccountRow = memo(function AccountRow({
   const game = state === "in_game" ? a.presence?.gameName : null;
   // a row menu is open: no "Last played" tooltip on top of it
   const [menu, setMenu] = useState(false);
+  // running on a paired computer: presence still says "In game", so say where too
+  const where = useElsewhere().get(a.userId ?? NaN);
+  const moving = useMoving((m) => m.ids.includes(a.id));
   return (
     <div
       ref={s.setNodeRef}
@@ -200,6 +205,11 @@ export const AccountRow = memo(function AccountRow({
                     {t(presenceKey[state])}
                   </span>
                   {game && <span className="sr-only">, {game}</span>}
+                  {where && (
+                    <span className="shrink-0 text-12 text-text-3 @max-[26rem]:sr-only">
+                      {t("elsewhere.on", { device: where.device })}
+                    </span>
+                  )}
                 </span>
               </span>
               <span
@@ -219,6 +229,22 @@ export const AccountRow = memo(function AccountRow({
                 )}
               </span>
               <span role="gridcell" className="flex shrink-0 items-center">
+                {where && (
+                  <Button
+                    sm
+                    variant="primary"
+                    className="mr-1"
+                    tabIndex={active ? 0 : -1}
+                    disabled={moving}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void runHere([a]);
+                    }}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                  >
+                    {t(moving ? "elsewhere.moving" : "elsewhere.runHere")}
+                  </Button>
+                )}
                 <button
                   type="button"
                   ref={s.setActivatorNodeRef}

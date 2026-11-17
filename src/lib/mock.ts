@@ -4,6 +4,7 @@ import {
   mockBus,
   type AccountView,
   type AddResult,
+  type Elsewhere,
   type GameTile,
   type LaunchTarget,
   type PresenceState,
@@ -219,6 +220,8 @@ const REMOTE = () => ({
     },
   ],
   session: null as { peer: string; since: string; control: boolean } | null,
+  /** what remote_elsewhere answers */
+  elsewhere: [] as Elsewhere[],
 });
 export const mockRemote = REMOTE();
 export const resetVaultMock = () => {
@@ -1001,6 +1004,10 @@ export async function mockCall(cmd: string, args?: unknown): Promise<unknown> {
       if (p) p.paired = false;
       return;
     }
+    case "remote_elsewhere":
+      return mockRemote.elsewhere;
+    case "remote_run_here":
+      return (args as { userIds: number[] }).userIds;
     case "homelab_latest": {
       const q = new URLSearchParams(location.search).get("hl");
       const mode = q === "offline" || q === "loading" || q === "nobuild" ? q : mockHomeLab.mode;

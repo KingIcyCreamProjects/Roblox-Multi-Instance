@@ -115,6 +115,8 @@ fn main() {
             "remote_pair",
             "remote_connect",
             "remote_forget",
+            "remote_elsewhere",
+            "remote_run_here",
             "homelab_latest",
             "homelab_download",
             "tool_block",

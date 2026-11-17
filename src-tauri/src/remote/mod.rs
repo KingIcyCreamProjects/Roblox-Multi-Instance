@@ -15,6 +15,7 @@ pub mod audio;
 pub mod desk;
 mod files;
 mod h264;
+pub mod handover;
 mod keys;
 pub mod viewer;
 
@@ -60,6 +61,9 @@ pub const PUSH_EVERY: Duration = Duration::from_secs(15);
 const PEER_TTL: Duration = Duration::from_secs(45);
 /// Most Roblox user ids one report may carry.
 const MAX_RUNNING: usize = 256;
+/// Run here gives the other computer this long to close the accounts (a queued hand-over
+/// waits for its next report, `PUSH_EVERY`).
+pub(crate) const HANDOVER_WAIT: Duration = Duration::from_secs(40);
 const STORE_FILE: &str = "remote.json";
 const AUTH_WAIT: Duration = Duration::from_secs(10);
 const MAX_UNACKED: usize = 4;
@@ -278,10 +282,26 @@ struct Inner {
     downloads: Mutex<Option<PathBuf>>,
     /// What each paired computer last said it runs, by paired id.
     peers: Mutex<HashMap<String, Report>>,
+    /// Vault, process list, auto-relaunch (set at app start; tests use a fake).
+    local: RwLock<Option<Arc<dyn handover::Local>>>,
+    /// What each computer this one holds a token for said it runs (its `running` answer), by
+    /// its IP.
+    hosts: Mutex<HashMap<String, Report>>,
+    /// Hand-overs waiting for a paired computer's next report, by paired id.
+    wants: Mutex<HashMap<String, (Instant, Vec<u64>)>>,
+    /// Woken after every stored report (a queued hand-over checks it).
+    tick: Notify,
 }
 
-/// A paired computer's report: when, its name, the Roblox user ids with a client there.
-type Report = (Instant, String, Vec<u64>);
+/// A computer's report: when, its name, the Roblox user ids with a client there.
+struct Report {
+    at: Instant,
+    name: String,
+    ids: Vec<u64>,
+    ip: String,
+    /// It takes hand-overs (an older RMI does not).
+    handover: bool,
+}
 
 type Ctx = Arc<Inner>;
 
@@ -476,6 +496,10 @@ impl Remote {
                 stopped_at: Mutex::default(),
                 downloads: Mutex::default(),
                 peers: Mutex::default(),
+                local: RwLock::default(),
+                hosts: Mutex::default(),
+                wants: Mutex::default(),
+                tick: Notify::new(),
             }),
             running: tokio::sync::Mutex::new(None),
         }
@@ -502,17 +526,149 @@ impl Remote {
     /// A paired computer's report, as the `running` route stores it.
     #[cfg(test)]
     pub(crate) fn note_running(&self, peer: &str, name: &str, ids: Vec<u64>) {
-        lock(&self.c.peers).insert(peer.into(), (Instant::now(), name.into(), ids));
+        let r = Report {
+            at: Instant::now(),
+            name: name.into(),
+            ids,
+            ip: String::new(),
+            handover: true,
+        };
+        lock(&self.c.peers).insert(peer.into(), r);
     }
 
-    /// (Roblox user id, computer name) for every account a paired computer reported running
-    /// within `PEER_TTL`.
+    /// What the computer at `ip` (this one holds its token) answered a report with.
+    pub(crate) fn note_host(&self, ip: &str, name: &str, mut ids: Vec<u64>) {
+        ids.truncate(MAX_RUNNING);
+        let r = Report {
+            at: Instant::now(),
+            name: name.into(),
+            ids,
+            ip: ip.into(),
+            handover: true,
+        };
+        lock(&self.c.hosts).insert(ip.into(), r);
+    }
+
+    pub fn set_local(&self, l: Arc<dyn handover::Local>) {
+        *self.c.local.write().unwrap_or_else(PoisonError::into_inner) = Some(l);
+    }
+
+    /// Every account a paired computer runs, from both directions, within `PEER_TTL`. An
+    /// account both directions report is listed once, from the computer this one can ask
+    /// directly.
+    pub fn elsewhere(&self) -> Vec<handover::Elsewhere> {
+        let mut out: Vec<handover::Elsewhere> = Vec::new();
+        for m in [&self.c.hosts, &self.c.peers] {
+            let mut m = lock(m);
+            m.retain(|_, r| r.at.elapsed() < PEER_TTL);
+            for r in m.values() {
+                for &user_id in &r.ids {
+                    if !out.iter().any(|e| e.user_id == user_id) {
+                        out.push(handover::Elsewhere {
+                            user_id,
+                            device: r.name.clone(),
+                            ip: r.ip.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// (Roblox user id, computer name) for every account a paired computer runs.
     pub fn running_elsewhere(&self) -> Vec<(u64, String)> {
-        let mut m = lock(&self.c.peers);
-        m.retain(|_, (at, ..)| at.elapsed() < PEER_TTL);
-        m.values()
-            .flat_map(|(_, name, ids)| ids.iter().map(move |i| (*i, name.clone())))
+        self.elsewhere()
+            .into_iter()
+            .map(|e| (e.user_id, e.device))
             .collect()
+    }
+
+    /// Run here: the computers running `ids` close them, all at once. `direct(ip, name, ids)`
+    /// asks a computer this one holds a token for; the others get it with their next report.
+    /// The released ids; `Err` (the first reason) only when none were.
+    pub async fn run_here<F, Fut>(&self, ids: &[u64], direct: F) -> Result<Vec<u64>, String>
+    where
+        F: Fn(String, String, Vec<u64>) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u64>, String>>,
+    {
+        let mut by: Vec<(String, String, Vec<u64>)> = Vec::new();
+        for e in self
+            .elsewhere()
+            .into_iter()
+            .filter(|e| ids.contains(&e.user_id))
+        {
+            match by.iter_mut().find(|g| g.0 == e.ip) {
+                Some(g) => g.2.push(e.user_id),
+                None => by.push((e.ip, e.device, vec![e.user_id])),
+            }
+        }
+        if by.is_empty() {
+            return Err("Those accounts are not running on another computer.".into());
+        }
+        let direct = &direct;
+        let asks = by.into_iter().map(|(ip, name, ids)| async move {
+            let has_token = lock(&self.c.hosts).contains_key(&ip);
+            if has_token {
+                direct(ip, name, ids).await
+            } else {
+                self.queued(&ip, &name, ids).await
+            }
+        });
+        let (mut out, mut why) = (Vec::new(), None);
+        for r in futures_util::future::join_all(asks).await {
+            match r {
+                Ok(v) => out.extend(v.into_iter().filter(|i| ids.contains(i))),
+                Err(e) => {
+                    why.get_or_insert(e);
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(why.unwrap_or_else(|| "The other computer could not close them.".into()));
+        }
+        // Gone from there now: don't offer Run here again until that computer's next report.
+        for m in [&self.c.hosts, &self.c.peers] {
+            for r in lock(m).values_mut() {
+                r.ids.retain(|i| !out.contains(i));
+            }
+        }
+        Ok(out)
+    }
+
+    /// A hand-over to the paired computer at `ip` (it holds the token): its next report's
+    /// answer asks for `ids`; done once a later report no longer lists some of them.
+    /// ponytail: one queued hand-over per computer at a time (a second replaces the first).
+    async fn queued(&self, ip: &str, name: &str, ids: Vec<u64>) -> Result<Vec<u64>, String> {
+        let found = lock(&self.c.peers)
+            .iter()
+            .find(|(_, r)| r.ip == ip)
+            .map(|(id, r)| (id.clone(), r.handover));
+        let (id, can) = found.ok_or_else(|| format!("Could not reach {name}."))?;
+        if !can {
+            return Err(format!("Update RMI on {name} first."));
+        }
+        let since = Instant::now();
+        lock(&self.c.wants).insert(id.clone(), (since, ids.clone()));
+        let gone = async {
+            loop {
+                // registered before the check: a report landing in between still wakes it
+                let n = self.c.tick.notified();
+                tokio::pin!(n);
+                n.as_mut().enable();
+                let left: Option<Vec<u64>> = lock(&self.c.peers)
+                    .get(&id)
+                    .filter(|r| r.at >= since)
+                    .map(|r| ids.iter().filter(|i| !r.ids.contains(i)).copied().collect());
+                if let Some(g) = left.filter(|g| !g.is_empty()) {
+                    return g;
+                }
+                n.await;
+            }
+        };
+        let r = tokio::time::timeout(HANDOVER_WAIT, gone).await;
+        lock(&self.c.wants).remove(&id);
+        r.map_err(|_| format!("{name} did not answer. Is RMI open there?"))
     }
 
     pub fn live(&self) -> Option<Live> {
@@ -732,6 +888,7 @@ fn router(c: Ctx) -> Router {
         .route("/v1/remote/hello", get(hello))
         .route("/v1/remote/pair", post(pair))
         .route("/v1/remote/running", post(running))
+        .route("/v1/remote/handover", post(handover))
         .route("/v1/remote/ws", get(ws))
         .fallback(|| async { ApiError::not_found("No such endpoint") })
         .layer(DefaultBodyLimit::max(MAX_TEXT))
@@ -774,30 +931,47 @@ async fn hello(State(c): State<Ctx>) -> Response {
 struct RunningBody {
     name: String,
     user_ids: Vec<u64>,
+    /// It takes hand-overs (an older RMI leaves this out).
+    #[serde(default)]
+    can_hand_over: bool,
+}
+
+/// The paired device's (name, id) calling with its Bearer token from the IP it paired from,
+/// while remote access is on. Same check as a session.
+fn paired_caller(c: &Inner, headers: &HeaderMap, from: SocketAddr) -> ApiResult<(String, String)> {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    c.who(token, &from.ip().to_string())
+        .filter(|_| c.on())
+        .ok_or_else(|| ApiError::new(403, "forbidden", "Not paired with this device."))
+}
+
+/// Runs `f` on the app's `Local` off the async threads; `None` while none is set.
+async fn on_local<T: Send + 'static>(
+    c: &Inner,
+    f: impl FnOnce(&dyn handover::Local) -> T + Send + 'static,
+) -> Option<T> {
+    let l = c
+        .local
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()?;
+    tokio::task::spawn_blocking(move || f(&*l)).await.ok()
 }
 
 /// A paired computer says which Roblox accounts (user ids) have a client there right now, so
-/// the friend page here can name the computer an account is on. Same check as a session:
-/// its token, used from the IP it paired from.
+/// the friend page here can name the computer an account is on. The answer says the same of
+/// this computer, plus any hand-over queued for that one (Run here).
 async fn running(
     State(c): State<Ctx>,
     ConnectInfo(from): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     b: Result<Json<RunningBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    let who = c.who(token, &from.ip().to_string()).filter(|_| c.on());
-    let Some((paired_name, id)) = who else {
-        return Err(ApiError::new(
-            403,
-            "forbidden",
-            "Not paired with this device.",
-        ));
-    };
+    let (paired_name, id) = paired_caller(&c, &headers, from)?;
     let b = b
         .map_err(|_| ApiError::new(400, "bad_request", "Bad request"))?
         .0;
@@ -808,8 +982,51 @@ async fn running(
     let name = Some(clean_name(&b.name))
         .filter(|n| !n.is_empty())
         .unwrap_or(paired_name);
-    lock(&c.peers).insert(id, (Instant::now(), name, b.user_ids));
-    Ok(Json(json!({})).into_response())
+    let r = Report {
+        at: Instant::now(),
+        name,
+        ids: b.user_ids,
+        ip: from.ip().to_string(),
+        handover: b.can_hand_over,
+    };
+    lock(&c.peers).insert(id.clone(), r);
+    c.tick.notify_waiters();
+    let ids = on_local(&c, |l| l.running()).await.flatten();
+    let mut v = json!({ "name": c.name(), "userIds": ids.unwrap_or_default() });
+    // asked once: the next report shows whether they closed
+    let want = lock(&c.wants).remove(&id);
+    if let Some((_, ids)) = want.filter(|(at, _)| at.elapsed() < HANDOVER_WAIT) {
+        v["handover"] = json!(ids);
+    }
+    Ok(Json(v).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HandoverBody {
+    user_ids: Vec<u64>,
+}
+
+/// Run here on a paired computer: close these accounts' clients here for good. Answers with
+/// the ids no longer running here.
+async fn handover(
+    State(c): State<Ctx>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    b: Result<Json<HandoverBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    paired_caller(&c, &headers, from)?;
+    let b = b
+        .map_err(|_| ApiError::new(400, "bad_request", "Bad request"))?
+        .0;
+    if b.user_ids.len() > MAX_RUNNING {
+        return Err(ApiError::new(400, "bad_request", "Too many accounts"));
+    }
+    let released = on_local(&c, move |l| l.release(&b.user_ids))
+        .await
+        .ok_or_else(|| ApiError::new(503, "unavailable", "RMI is still starting."))?
+        .ok_or_else(|| ApiError::new(409, "locked", "RMI is locked on this computer."))?;
+    Ok(Json(json!({ "released": released })).into_response())
 }
 
 #[derive(Deserialize)]

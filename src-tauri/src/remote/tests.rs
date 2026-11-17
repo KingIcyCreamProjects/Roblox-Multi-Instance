@@ -243,9 +243,302 @@ async fn running_report_only_from_a_paired_computer() {
     assert_eq!(post(Some(token), body).await, 400);
     // Forgotten once no new report came for `PEER_TTL`.
     for v in lock(&r.c.peers).values_mut() {
-        v.0 -= PEER_TTL;
+        v.at -= PEER_TTL;
     }
     assert!(r.running_elsewhere().is_empty());
+}
+
+/// `Local` that runs `running` (or is locked) and records every release.
+#[derive(Default)]
+struct FakeLocal {
+    running: Mutex<Option<Vec<u64>>>,
+    locked: AtomicBool,
+    released: Mutex<Vec<Vec<u64>>>,
+}
+
+impl handover::Local for FakeLocal {
+    fn running(&self) -> Option<Vec<u64>> {
+        lock(&self.running).clone()
+    }
+    fn release(&self, ids: &[u64]) -> Option<Vec<u64>> {
+        lock(&self.released).push(ids.to_vec());
+        (!self.locked.load(SeqCst)).then(|| ids.to_vec())
+    }
+}
+
+fn with_local(r: &Remote, running: Option<Vec<u64>>) -> Arc<FakeLocal> {
+    let l = Arc::new(FakeLocal {
+        running: Mutex::new(running),
+        ..Default::default()
+    });
+    r.set_local(l.clone());
+    l
+}
+
+/// POST `path` with `token`: (status, body).
+async fn post_json(addr: &str, path: &str, token: &str, body: Value) -> (u16, Value) {
+    let r = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/remote/{path}"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (r.status().as_u16(), r.json().await.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn running_answer_carries_the_hosts_own_accounts() {
+    let (_d, r, _f) = setup(true);
+    with_local(&r, Some(vec![5, 6]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let body = json!({"name": "Mac", "userIds": [7]});
+    let (st, v) = post_json(&addr, "running", &token, body).await;
+    assert_eq!(st, 200);
+    assert_eq!(v, json!({"name": "Test PC", "userIds": [5, 6]}));
+}
+
+#[tokio::test]
+async fn running_answer_is_empty_while_locked() {
+    let (_d, r, _f) = setup(true);
+    with_local(&r, None);
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let (_, v) = post_json(&addr, "running", &token, json!({"name": "", "userIds": []})).await;
+    assert_eq!(v["userIds"], json!([]));
+}
+
+#[tokio::test]
+async fn handover_route_releases_only_for_a_paired_computer() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let body = json!({"userIds": [7]});
+    let (st, _) = post_json(&addr, "handover", &new_token(), body.clone()).await;
+    assert_eq!(st, 403);
+    assert!(lock(&l.released).is_empty());
+    let many: Vec<u64> = (0..=MAX_RUNNING as u64).collect();
+    let (st, _) = post_json(&addr, "handover", &token, json!({ "userIds": many })).await;
+    assert_eq!(st, 400);
+    assert!(lock(&l.released).is_empty());
+    let (st, v) = post_json(&addr, "handover", &token, body).await;
+    assert_eq!((st, v), (200, json!({"released": [7]})));
+    assert_eq!(*lock(&l.released), [vec![7]]);
+}
+
+#[tokio::test]
+async fn handover_route_says_locked() {
+    let (_d, r, _f) = setup(true);
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    // No `Local` yet (app still starting): 503.
+    let (st, _) = post_json(&addr, "handover", &token, json!({"userIds": [7]})).await;
+    assert_eq!(st, 503);
+    let l = with_local(&r, None);
+    l.locked.store(true, SeqCst);
+    let (st, v) = post_json(&addr, "handover", &token, json!({"userIds": [7]})).await;
+    assert_eq!((st, &v["error"]["code"]), (409, &json!("locked")), "{v}");
+}
+
+/// The host's side of a queued hand-over to the paired viewer at 127.0.0.1 ("Mac").
+fn queue(r: &Arc<Remote>, ids: Vec<u64>) -> tokio::task::JoinHandle<Result<Vec<u64>, String>> {
+    let r = r.clone();
+    tokio::spawn(async move {
+        let direct = |_: String, _: String, _: Vec<u64>| async { panic!("not a host") };
+        r.run_here(&ids, direct).await
+    })
+}
+
+#[tokio::test]
+async fn queued_handover_rides_the_next_report_and_completes() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = |ids: Vec<u64>| json!({"name": "Mac", "userIds": ids, "canHandOver": true});
+    post_json(&addr, "running", &token, report(vec![9, 4])).await;
+    let task = queue(&r, vec![9]);
+    while lock(&r.c.wants).is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The viewer's next report still runs 9; its answer asks for it.
+    let (_, v) = post_json(&addr, "running", &token, report(vec![9, 4])).await;
+    assert_eq!(v["handover"], json!([9]));
+    assert!(!task.is_finished());
+    // Asked once only.
+    let (_, v) = post_json(&addr, "running", &token, report(vec![9, 4])).await;
+    assert_eq!(v.get("handover"), None);
+    // The report after its release no longer lists 9.
+    post_json(&addr, "running", &token, report(vec![4])).await;
+    assert_eq!(task.await.unwrap(), Ok(vec![9]));
+    assert!(lock(&r.c.wants).is_empty());
+}
+
+/// A report from the viewer at 127.0.0.1, straight into `peers`.
+fn peer_report(r: &Remote, name: &str, ids: Vec<u64>, can_hand_over: bool) {
+    lock(&r.c.peers).insert(
+        "viewer".into(),
+        Report {
+            at: Instant::now(),
+            name: name.into(),
+            ids,
+            ip: "127.0.0.1".into(),
+            handover: can_hand_over,
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_handover_gives_up_after_the_wait() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    peer_report(&r, "Mac", vec![9], true);
+    let got = queue(&r, vec![9]).await.unwrap();
+    assert_eq!(got, Err("Mac did not answer. Is RMI open there?".into()));
+    assert!(lock(&r.c.wants).is_empty());
+}
+
+#[tokio::test]
+async fn queued_handover_needs_a_new_rmi_there() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    // An older RMI reports without `canHandOver`: nothing is asked, nothing waits.
+    peer_report(&r, "Mac", vec![9], false);
+    let got = queue(&r, vec![9]).await.unwrap();
+    assert_eq!(got, Err("Update RMI on Mac first.".into()));
+    assert!(lock(&r.c.wants).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_here_keeps_what_one_computer_released() {
+    let (_d, r, _f) = setup(true);
+    peer_report(&r, "Mac", vec![9], true); // never answers
+    r.note_host("100.64.0.2", "Office PC", vec![1, 2]);
+    let asked = Mutex::new(vec![]);
+    let direct = |ip: String, name: String, ids: Vec<u64>| {
+        lock(&asked).push((ip, name, ids));
+        async { Ok(vec![1, 77]) } // 77 was never asked for
+    };
+    assert_eq!(r.run_here(&[1, 2, 9], direct).await, Ok(vec![1]));
+    assert_eq!(
+        *lock(&asked),
+        [("100.64.0.2".into(), "Office PC".into(), vec![1, 2])]
+    );
+    // Nothing elsewhere, or every computer failed: the reason.
+    let fail = |_: String, name: String, _: Vec<u64>| async move {
+        Err(format!("RMI is locked on {name}."))
+    };
+    assert_eq!(
+        r.run_here(&[5], fail).await,
+        Err("Those accounts are not running on another computer.".into())
+    );
+    // 1 was released: no longer listed there, so Run here is not offered for it again.
+    assert!(!r.elsewhere().iter().any(|e| e.user_id == 1));
+    assert_eq!(
+        r.run_here(&[2], fail).await,
+        Err("RMI is locked on Office PC.".into())
+    );
+}
+
+#[test]
+fn elsewhere_lists_both_directions_and_drops_old_reports() {
+    let (_d, r, _f) = setup(true);
+    peer_report(&r, "Mac", vec![9], true);
+    r.note_host("100.64.0.2", "Office PC", vec![1, 9]);
+    let mut got = r.elsewhere();
+    got.sort_by_key(|e| e.user_id);
+    let row = |user_id, device: &str, ip: &str| handover::Elsewhere {
+        user_id,
+        device: device.into(),
+        ip: ip.into(),
+    };
+    // 9 in both: listed once, from the computer this one can ask directly.
+    assert_eq!(
+        got,
+        [
+            row(1, "Office PC", "100.64.0.2"),
+            row(9, "Office PC", "100.64.0.2")
+        ]
+    );
+    peer_report(&r, "Mac", vec![3], true);
+    let mut names = r.running_elsewhere();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            (1, "Office PC".into()),
+            (3, "Mac".into()),
+            (9, "Office PC".into())
+        ]
+    );
+    for m in [&r.c.peers, &r.c.hosts] {
+        for v in lock(m).values_mut() {
+            v.at -= PEER_TTL;
+        }
+    }
+    assert!(r.elsewhere().is_empty());
+}
+
+/// The releasing computer: the client closes and auto-relaunch leaves it closed.
+#[test]
+fn release_closes_for_good() {
+    use crate::automation::relaunch::{Cfg, Obs};
+    use crate::platform::{Capabilities, Platform, RobloxInstall};
+    struct Plat(Arc<Mutex<Vec<String>>>);
+    impl Platform for Plat {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+        fn roblox_install(&self) -> Option<RobloxInstall> {
+            None
+        }
+        fn open_uri(&self, _: &str) -> std::io::Result<()> {
+            panic!("no real launches in tests")
+        }
+        fn tracked_clients(&self, t: &[String]) -> Vec<(u32, String)> {
+            let l = lock(&self.0);
+            l.iter()
+                .filter(|c| t.contains(c))
+                .map(|c| (1, c.clone()))
+                .collect()
+        }
+        fn close_tracked(&self, t: &str) -> std::io::Result<usize> {
+            lock(&self.0).retain(|c| c != t);
+            Ok(1)
+        }
+    }
+    let d = tempfile::tempdir().unwrap();
+    // Alice (user id 1, tracker 100000) and bob (2) both have a client here.
+    let live = Arc::new(Mutex::new(vec!["100000".into(), "200000".into()]));
+    let h = crate::automation::backend::tests::host_with(d.path(), Box::new(Plat(live.clone())));
+    let st = &h.0;
+    let obs = |up, exited| Obs {
+        account: "Alice".into(),
+        cfg: Cfg {
+            enabled: true,
+            delay: Duration::from_secs(5),
+            ..Default::default()
+        },
+        up,
+        exited,
+        ..Default::default()
+    };
+    let relaunch = || lock(&st.automation.relaunch);
+    let t0 = tokio::time::Instant::now();
+    relaunch().tick(t0, &[obs(true, false)], Duration::from_secs(9));
+    // 1 closes; 3 is not saved here, so nothing runs it: released too.
+    assert_eq!(handover::release(st, &[1, 3]), Some(vec![1, 3]));
+    assert_eq!(*lock(&live), ["200000"]);
+    let t1 = t0 + Duration::from_secs(1);
+    relaunch().tick(t1, &[obs(false, true)], Duration::from_secs(9));
+    assert_eq!(relaunch().status("Alice", t1, 0)["pendingAt"], Value::Null);
+    assert_eq!(handover::running_ids(st), Some(vec![2]));
+    *crate::commands::guard(&st.vault) = None;
+    assert_eq!(handover::release(st, &[2]), None);
+    assert_eq!(handover::running_ids(st), None);
 }
 
 /// The next `bye`, skipping other control messages.

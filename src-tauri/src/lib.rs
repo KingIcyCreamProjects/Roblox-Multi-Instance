@@ -295,6 +295,8 @@ pub fn run() {
             remote::viewer::remote_pair,
             remote::viewer::remote_connect,
             remote::viewer::remote_forget,
+            remote::handover::remote_elsewhere,
+            remote::handover::remote_run_here,
             homelab_get::homelab_latest,
             homelab_get::homelab_download,
             commands::automation_snapshot,
@@ -493,6 +495,7 @@ pub fn run() {
             }
             let h = app.handle().clone();
             remote.set_hook(Arc::new(move || remote::on_change(&h)));
+            remote.set_local(Arc::new(remote::handover::AppLocal(app.handle().clone())));
             if remote.enabled() {
                 let r = remote.clone();
                 tauri::async_runtime::spawn(async move { r.sync().await });
