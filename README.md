@@ -16,7 +16,7 @@ All downloads are on [GitHub Releases][latest], under Assets.
 
 ### Windows
 
-Grab the `x64-setup.exe` installer (for example `Roblox.Multi.Instance_1.0.1_x64-setup.exe`) from the [latest release][latest] and run it. It installs for your user only and doesn't ask for admin. An `.msi` is there too.
+Grab the `x64-setup.exe` installer (for example `Roblox.Multi.Instance_1.0.2_x64-setup.exe`) from the [latest release][latest] and run it. It installs for your user only and doesn't ask for admin. An `.msi` is there too.
 
 Or paste this into PowerShell. It first adds RMI's folder to Windows Security's exclusions (one admin prompt, [here's why](#windows-security-says-its-a-virus)), then downloads the newest installer from the latest release and starts it. Click No on the admin prompt to skip the exclusion; the install still runs.
 
@@ -162,8 +162,8 @@ Checks: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and in `src-tauri/` `cargo f
 Pushing a `v` tag runs `.github/workflows/release.yml`, which builds the bundles, makes a draft release and uploads `latest.json` for the updater. Review the draft, then publish it. You can also start it from the Actions tab.
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
 The tag has to match `version` in `src-tauri/tauri.conf.json` (`0.2.1-rc.1` for `v0.2.1-rc.1`) or the run stops.

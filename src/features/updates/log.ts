@@ -16,6 +16,26 @@ export type Update = {
 
 export const UPDATES: Update[] = [
   {
+    version: "1.0.2",
+    date: "2026-11-17",
+    title: "Run here, and accounts that start with your computer",
+    summary:
+      "Move a running account from one of your computers to another with one click, and have RMI launch your accounts by itself when it starts on login.",
+    added: [
+      {
+        text: "Run here: an account running on a computer you paired shows where it runs. Click Run here and that computer closes it while this one launches it. It works for one account, a selection, or everything on a computer from the Devices tab. Both computers need this version.",
+        to: "devices",
+      },
+      {
+        text: "Launch on login: name the accounts RMI should launch when it starts with your computer, each into its saved destination.",
+        to: "startup.accounts",
+      },
+    ],
+    improved: [
+      "Computers you paired now tell each other which accounts they run in both directions, so one pairing is enough.",
+    ],
+  },
+  {
     version: "1.0.1",
     date: "2026-11-16",
     title: "Fixes, and an easier friend remote",
