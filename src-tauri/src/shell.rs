@@ -104,9 +104,13 @@ fn flag(app: &AppHandle, ptr: &str) -> bool {
 /// when this session began with `--autostart`.
 const JUST_INSTALLED: &str = "/updates/justInstalled";
 
-fn just_installed(app: &AppHandle, on: bool) {
+/// With it: the install ran by itself while RMI was opening, so the restart is that start.
+const AT_START: &str = "/updates/installedAtStart";
+
+fn just_installed(app: &AppHandle, on: bool, at_start: bool) {
     let st = app.state::<AppState>();
-    if let Err(e) = crate::commands::persist(&st, &json!({ "updates": { "justInstalled": on } })) {
+    let patch = json!({ "updates": { "justInstalled": on, "installedAtStart": on && at_start } });
+    if let Err(e) = crate::commands::persist(&st, &patch) {
         log::warn!("update restart flag not saved: {e}");
     }
 }
@@ -345,8 +349,10 @@ fn read_autostart(app: &AppHandle) {
 
 /// `startup.accounts`: comma-separated names, each an alias, display name or username (any
 /// case). Friend-paused accounts are left out: an automated launch of one is refused, and
-/// that would fail the whole batch.
-fn login_ids(names: &str, accounts: &[Account]) -> Vec<String> {
+/// that would fail the whole batch. So are accounts whose client runs already (`live`
+/// tracker ids): the restart after an update keeps `--autostart`, and launching those again
+/// would close and reopen them.
+fn login_ids(names: &str, accounts: &[Account], live: &[String]) -> Vec<String> {
     let want: Vec<String> = names
         .split(',')
         .map(|n| n.trim().to_lowercase())
@@ -354,7 +360,7 @@ fn login_ids(names: &str, accounts: &[Account]) -> Vec<String> {
         .collect();
     accounts
         .iter()
-        .filter(|a| !a.friend_paused)
+        .filter(|a| !a.friend_paused && !live.contains(&a.tracker_id))
         .filter(|a| {
             [
                 a.alias.as_deref().unwrap_or(""),
@@ -382,21 +388,43 @@ fn login_launch(app: &AppHandle) {
     }
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
+        // An update found at start installs first: its restart does the launching. Not
+        // counted below (a download, or Linux's admin prompt, can take a while).
+        while !START_CHECKED.load(Ordering::SeqCst) || update_installing() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
         // ponytail: one batch, no retry of an account that fails; 5 s polls for 10 min
         for _ in 0..120 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if !crate::automation::relaunch::online().await {
                 continue;
             }
+            let h2 = h.clone();
+            // Tracker ids with a client up; `None` while locked (wait for the unlock).
+            let live = tauri::async_runtime::spawn_blocking(move || {
+                let st = h2.state::<AppState>();
+                let trackers: Vec<String> = {
+                    let g = st.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let all = g.as_ref()?.payload().accounts.iter();
+                    all.map(|a| a.tracker_id.clone()).collect()
+                };
+                let clients = st.platform.tracked_clients(&trackers);
+                Some(clients.into_iter().map(|(_, t)| t).collect::<Vec<String>>())
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(live) = live else { continue };
             // no await from here to the launch: a friend pause can't land in between
             let ids = {
                 let st = h.state::<AppState>();
                 let g = st.vault.lock().unwrap_or_else(|e| e.into_inner());
-                g.as_ref().map(|v| login_ids(&names, &v.payload().accounts))
+                g.as_ref()
+                    .map(|v| login_ids(&names, &v.payload().accounts, &live))
             };
             let Some(ids) = ids else { continue }; // locked: wait for the unlock
             if ids.is_empty() {
-                return log::warn!("login start: no account matches startup.accounts");
+                return log::info!("login start: nothing to launch (no match, or running already)");
             }
             return match crate::launch::launcher::start_batch(
                 &h,
@@ -453,11 +481,15 @@ pub fn init(app: &AppHandle) {
     // The window is created hidden (no flash at login); show it unless starting in the tray.
     // The relaunch after an update keeps argv, so a login session would come back hidden.
     let updated = flag(app, JUST_INSTALLED);
+    // That update installed itself while RMI was starting: this restart is still the start.
+    let still_starting = flag(app, AT_START);
     if updated {
-        just_installed(app, false);
+        just_installed(app, false, false);
     }
-    let login = !updated && std::env::args().any(|a| a == AUTOSTART_ARG);
-    let minimized = login && flag(app, "/startup/minimized");
+    let autostart = std::env::args().any(|a| a == AUTOSTART_ARG);
+    // Not after an update the user installed mid-session: accounts they closed stay closed.
+    let login = autostart && (!updated || still_starting);
+    let minimized = !updated && autostart && flag(app, "/startup/minimized");
     if !minimized || app.tray_by_id(TRAY).is_none() {
         show_main(app);
         if minimized {
@@ -474,14 +506,31 @@ pub fn init(app: &AppHandle) {
     }
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut at_start = true;
         loop {
             if flag(&h, "/updates/auto") {
                 quiet_check(&h).await;
+                // Only when RMI opens, like a game launcher: a session in use is never
+                // restarted under the user. A later find waits for the next open (or Settings).
+                let found = PENDING.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+                // `!updated`: an install that left the version where it was must not loop.
+                if at_start && found && !updated && flag(&h, "/updates/install") {
+                    log::info!("update found at start: installing");
+                    // returns only when it failed: carry on with this version
+                    if let Err(e) = install(&h, true).await {
+                        log::info!("update not installed at start: {e}");
+                    }
+                }
             }
+            at_start = false;
+            START_CHECKED.store(true, Ordering::SeqCst);
             tokio::time::sleep(UPDATE_EVERY).await;
         }
     });
 }
+
+/// The check at start is over and no install took the app down: a login start may launch.
+static START_CHECKED: AtomicBool = AtomicBool::new(false);
 
 /// Background check: failures are logged (info), never shown.
 async fn quiet_check(app: &AppHandle) {
@@ -563,6 +612,13 @@ impl Drop for Installing {
 /// Download, install and restart into the update found by the last check.
 #[tauri::command]
 pub async fn update_install(app: AppHandle) -> CmdResult<()> {
+    install(&app, false).await
+}
+
+/// `update_install`; with `at_start`, RMI running it by itself as it opens
+/// (`updates.install`). Returns only on failure.
+async fn install(app: &AppHandle, at_start: bool) -> CmdResult<()> {
+    let app = app.clone();
     // One install at a time, whatever the UI thinks (it may have remounted mid-download).
     portable(&app)?;
     let _busy = Installing::take().ok_or(UPDATE_BUSY)?;
@@ -581,10 +637,18 @@ pub async fn update_install(app: AppHandle) -> CmdResult<()> {
     // Windows exits inside `install` (no RunEvent::Exit): stop background work first, but keep
     // the vault open so a failure still shows in Settings. Elsewhere restart() -> Exit -> shutdown.
     let was_running = cfg!(windows) && pause(&app).await;
+    // Nobody asked for this restart: a launch begun since RMI opened is not cut off.
+    // ponytail: a batch starting in the instant after this check still is.
+    if at_start && crate::launch::launcher::busy() {
+        if cfg!(windows) {
+            resume(&app, was_running).await;
+        }
+        return Err("a launch is running; the update waits for the next start".into());
+    }
     // Set before install: Windows relaunches from inside it.
-    just_installed(&app, true);
+    just_installed(&app, true, at_start);
     if let Err(e) = u.install(bytes) {
-        just_installed(&app, false);
+        just_installed(&app, false, false);
         if cfg!(windows) {
             resume(&app, was_running).await;
         }
@@ -630,10 +694,15 @@ mod tests {
             shown,
         ];
         assert_eq!(
-            login_ids(" main, BOB ,carl,dee,,nobody", &all),
+            login_ids(" main, BOB ,carl,dee,,nobody", &all, &[]),
             ["1", "2", "4"]
         );
-        assert!(login_ids("", &all).is_empty());
+        assert!(login_ids("", &all, &[]).is_empty());
+        // a client that runs already is not launched again (the restart after an update)
+        let mut up = acct("5", false, 0, None, "Eve");
+        up.tracker_id = "t5".into();
+        let all = [acct("1", false, 0, Some("Main"), "alice"), up];
+        assert_eq!(login_ids("main, eve", &all, &["t5".into()]), ["1"]);
     }
 
     #[test]

@@ -15,7 +15,8 @@ pub fn defaults() -> Value {
         "startup": { "launchOnLogin": false, "minimized": false, "accounts": "" },
         "tray": { "enabled": true },
         // `seen`: last app version whose update notes were shown (null: never)
-        "updates": { "auto": true, "seen": null },
+        // `install`: an update found when RMI opens installs by itself
+        "updates": { "auto": true, "install": true, "seen": null },
         "multi": { "enabled": true, "cookieLock": true },
         // Each client starts capped at 60 FPS and graphics level 1 (lightest); both changeable.
         "fps": { "unlock": true, "value": 60 },

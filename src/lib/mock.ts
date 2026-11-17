@@ -28,7 +28,7 @@ const DEFAULTS: Record<string, unknown> = {
   recents: { max: 20 },
   startup: { launchOnLogin: false, minimized: false, accounts: "" },
   tray: { enabled: true },
-  updates: { auto: true, seen: null },
+  updates: { auto: true, install: true, seen: null },
   multi: { enabled: true, cookieLock: true },
   fps: { unlock: true, value: 60 },
   graphics: { set: true, level: 1 },

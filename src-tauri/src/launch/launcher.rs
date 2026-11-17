@@ -155,6 +155,14 @@ static BATCHES: LazyLock<Mutex<HashMap<String, CancellationToken>>> =
 /// Accounts with a launch in progress, across batches.
 static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
+/// A launch batch is running or waiting its turn.
+pub fn busy() -> bool {
+    !BATCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_empty()
+}
+
 /// After a batch ends, how long its accounts stay "ours" for auto-relaunch (old client
 /// exit, socket drop).
 pub const OWN_GRACE: Duration = Duration::from_secs(30);

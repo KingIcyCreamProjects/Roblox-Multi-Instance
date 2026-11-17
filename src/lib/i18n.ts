@@ -778,7 +778,10 @@ const en = {
   "set.tray.enabled": "Tray icon",
   "set.tray.enabled.d": "Show an RMI icon in the system tray (the menu bar on macOS).",
   "set.updates.auto": "Check for updates automatically",
-  "set.updates.auto.d": "Look for new versions on its own. You confirm installs.",
+  "set.updates.auto.d": "Look for new versions on its own.",
+  "set.updates.install": "Install updates automatically",
+  "set.updates.install.d":
+    "When RMI opens and a new version is out, it installs it and restarts by itself. Off: you install it from Settings.",
   "set.multi.enabled": "Multi-instance",
   "set.multi.enabled.d": "Let more than one Roblox window run at once.",
   "set.multi.cookieLock": "Cookie lock",

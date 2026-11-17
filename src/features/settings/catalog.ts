@@ -86,6 +86,7 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       },
       b("tray.enabled"),
       b("updates.auto"),
+      b("updates.install", { dep: ["updates.auto"] }),
     ],
   },
   {
