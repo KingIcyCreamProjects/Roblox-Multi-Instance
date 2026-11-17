@@ -16,6 +16,22 @@ export type Update = {
 
 export const UPDATES: Update[] = [
   {
+    version: "1.0.3",
+    date: "2026-11-17",
+    title: "Updates install themselves",
+    summary:
+      "When you open RMI and a new version is out, it now installs it and restarts by itself, the way a game launcher does.",
+    added: [
+      {
+        text: "Install updates automatically: on by default. RMI only updates when it opens, never in the middle of a session. Switch it off to install from Settings yourself.",
+        to: "updates.install",
+      },
+    ],
+    improved: [
+      "Launch on login still launches your accounts when RMI updates itself on the way up, and never restarts an account that is already running.",
+    ],
+  },
+  {
     version: "1.0.2",
     date: "2026-11-17",
     title: "Run here, and accounts that start with your computer",

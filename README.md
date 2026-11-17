@@ -16,7 +16,7 @@ All downloads are on [GitHub Releases][latest], under Assets.
 
 ### Windows
 
-Grab the `x64-setup.exe` installer (for example `Roblox.Multi.Instance_1.0.2_x64-setup.exe`) from the [latest release][latest] and run it. It installs for your user only and doesn't ask for admin. An `.msi` is there too.
+Grab the `x64-setup.exe` installer (for example `Roblox.Multi.Instance_1.0.3_x64-setup.exe`) from the [latest release][latest] and run it. It installs for your user only and doesn't ask for admin. An `.msi` is there too.
 
 Or paste this into PowerShell. It first adds RMI's folder to Windows Security's exclusions (one admin prompt, [here's why](#windows-security-says-its-a-virus)), then downloads the newest installer from the latest release and starts it. Click No on the admin prompt to skip the exclusion; the install still runs.
 
@@ -83,7 +83,7 @@ The Devices tab lists your other computers on your own Tailscale network. Pair o
 
 ## Updates
 
-RMI checks GitHub for new versions and asks before installing. Updates are signed, and RMI refuses one that doesn't verify against the public key built into the app. To turn the check off, clear "Check for updates automatically" in Settings. Your vault and settings stay across updates. Updates work on Windows, macOS and Linux. On Linux the AppImage replaces itself, and a `.deb` or `.rpm` install asks for your admin password to update.
+RMI checks GitHub for new versions. One it finds when it opens is installed right away, and RMI restarts by itself; one found while RMI is running waits for the next time you open it (or install it from Settings). To be asked first, clear "Install updates automatically" in Settings. Updates are signed, and RMI refuses one that doesn't verify against the public key built into the app. To turn the check off, clear "Check for updates automatically" in Settings. Your vault and settings stay across updates. Updates work on Windows, macOS and Linux. On Linux the AppImage replaces itself, and a `.deb` or `.rpm` install asks for your admin password to update.
 
 ## Using it
 
@@ -162,8 +162,8 @@ Checks: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and in `src-tauri/` `cargo f
 Pushing a `v` tag runs `.github/workflows/release.yml`, which builds the bundles, makes a draft release and uploads `latest.json` for the updater. Review the draft, then publish it. You can also start it from the Actions tab.
 
 ```bash
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 The tag has to match `version` in `src-tauri/tauri.conf.json` (`0.2.1-rc.1` for `v0.2.1-rc.1`) or the run stops.
