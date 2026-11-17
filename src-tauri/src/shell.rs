@@ -343,6 +343,76 @@ fn read_autostart(app: &AppHandle) {
     }
 }
 
+/// `startup.accounts`: comma-separated names, each an alias, display name or username (any
+/// case). Friend-paused accounts are left out: an automated launch of one is refused, and
+/// that would fail the whole batch.
+fn login_ids(names: &str, accounts: &[Account]) -> Vec<String> {
+    let want: Vec<String> = names
+        .split(',')
+        .map(|n| n.trim().to_lowercase())
+        .filter(|n| !n.is_empty())
+        .collect();
+    accounts
+        .iter()
+        .filter(|a| !a.friend_paused)
+        .filter(|a| {
+            [
+                a.alias.as_deref().unwrap_or(""),
+                &a.display_name,
+                &a.username,
+            ]
+            .iter()
+            .any(|s| want.contains(&s.to_lowercase()))
+        })
+        .map(|a| a.id.clone())
+        .collect()
+}
+
+/// Login start: launch the `startup.accounts` accounts into their saved targets, once the
+/// vault is open and roblox.com answers (after a crash the PC is back before its network).
+fn login_launch(app: &AppHandle) {
+    let names = {
+        let st = app.state::<AppState>();
+        let s = st.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let n = s.pointer("/startup/accounts").and_then(Value::as_str);
+        n.unwrap_or_default().to_owned()
+    };
+    if names.trim().is_empty() {
+        return;
+    }
+    let h = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // ponytail: one batch, no retry of an account that fails; 5 s polls for 10 min
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if !crate::automation::relaunch::online().await {
+                continue;
+            }
+            // no await from here to the launch: a friend pause can't land in between
+            let ids = {
+                let st = h.state::<AppState>();
+                let g = st.vault.lock().unwrap_or_else(|e| e.into_inner());
+                g.as_ref().map(|v| login_ids(&names, &v.payload().accounts))
+            };
+            let Some(ids) = ids else { continue }; // locked: wait for the unlock
+            if ids.is_empty() {
+                return log::warn!("login start: no account matches startup.accounts");
+            }
+            return match crate::launch::launcher::start_batch(
+                &h,
+                ids,
+                crate::launch::resolve::Bar::default(),
+                false,
+                false,
+            ) {
+                Ok(b) => log::info!("login start: launch {b}"),
+                Err(e) => log::warn!("login start: launch failed: {e}"),
+            };
+        }
+        log::warn!("login start: accounts not launched (vault locked or offline for 10 min)");
+    });
+}
+
 /// Main window close: hide to the tray when there is one.
 pub fn on_close(w: &Window, api: &tauri::CloseRequestApi) {
     let app = w.app_handle();
@@ -386,8 +456,8 @@ pub fn init(app: &AppHandle) {
     if updated {
         just_installed(app, false);
     }
-    let minimized =
-        !updated && std::env::args().any(|a| a == AUTOSTART_ARG) && flag(app, "/startup/minimized");
+    let login = !updated && std::env::args().any(|a| a == AUTOSTART_ARG);
+    let minimized = login && flag(app, "/startup/minimized");
     if !minimized || app.tray_by_id(TRAY).is_none() {
         show_main(app);
         if minimized {
@@ -398,6 +468,9 @@ pub fn init(app: &AppHandle) {
     }
     if isolated {
         return;
+    }
+    if login {
+        login_launch(app);
     }
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -542,6 +615,25 @@ mod tests {
             username: user.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn login_ids_match_any_name_and_skip_friend_paused() {
+        let mut paused = acct("3", false, 0, None, "Carl");
+        paused.friend_paused = true;
+        let mut shown = acct("4", false, 0, None, "user4");
+        shown.display_name = "Dee".into();
+        let all = [
+            acct("1", false, 0, Some("Main"), "alice"),
+            acct("2", false, 0, None, "Bob"),
+            paused,
+            shown,
+        ];
+        assert_eq!(
+            login_ids(" main, BOB ,carl,dee,,nobody", &all),
+            ["1", "2", "4"]
+        );
+        assert!(login_ids("", &all).is_empty());
     }
 
     #[test]

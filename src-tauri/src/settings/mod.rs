@@ -11,7 +11,8 @@ pub fn defaults() -> Value {
         "version": VERSION,
         "launch": { "delayMs": 2500, "replacePrevious": true, "randomPages": 5, "restoreWindowRect": false, "startMinimized": false },
         "recents": { "max": 20 },
-        "startup": { "launchOnLogin": false, "minimized": false },
+        // `accounts`: names (comma-separated) to launch when RMI starts on login
+        "startup": { "launchOnLogin": false, "minimized": false, "accounts": "" },
         "tray": { "enabled": true },
         // `seen`: last app version whose update notes were shown (null: never)
         "updates": { "auto": true, "seen": null },

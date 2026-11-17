@@ -25,7 +25,7 @@ const DEFAULTS: Record<string, unknown> = {
     startMinimized: false,
   },
   recents: { max: 20 },
-  startup: { launchOnLogin: false, minimized: false },
+  startup: { launchOnLogin: false, minimized: false, accounts: "" },
   tray: { enabled: true },
   updates: { auto: true, seen: null },
   multi: { enabled: true, cookieLock: true },

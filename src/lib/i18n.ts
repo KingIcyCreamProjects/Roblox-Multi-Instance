@@ -761,6 +761,9 @@ const en = {
   "set.startup.launchOnLogin.d": "Open RMI when you sign in to your computer.",
   "set.startup.minimized": "Start minimized",
   "set.startup.minimized.d": "Start in the background without opening the window.",
+  "set.startup.accounts": "Launch on login",
+  "set.startup.accounts.d":
+    "Accounts to launch when RMI starts on login, each into its saved destination. Names, separated by commas.",
   "set.tray.enabled": "Tray icon",
   "set.tray.enabled.d": "Show an RMI icon in the system tray (the menu bar on macOS).",
   "set.updates.auto": "Check for updates automatically",

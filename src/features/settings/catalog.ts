@@ -77,6 +77,13 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       n("recents.max", 1, 50),
       b("startup.launchOnLogin"),
       b("startup.minimized"),
+      {
+        path: "startup.accounts",
+        kind: "text",
+        onBlur: true,
+        dep: ["startup.launchOnLogin"],
+        placeholder: "Name1, Name2",
+      },
       b("tray.enabled"),
       b("updates.auto"),
     ],
