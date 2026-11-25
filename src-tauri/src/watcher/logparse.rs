@@ -111,11 +111,17 @@ pub fn rejoin_events(text: &str) -> (Option<(u64, String)>, Option<u32>, bool) {
     });
     let (mut join, mut reason, mut marked) = (None, None, false);
     for c in text.lines().filter_map(|l| re.captures(l)) {
-        if let (Some(j), Some(p)) = (c.get(1), c.get(2).and_then(|p| p.as_str().parse().ok())) {
-            join = Some((p, j.as_str().to_owned()));
-            reason = None;
-        } else if let Some(n) = c.get(3).and_then(|n| n.as_str().parse().ok()) {
-            reason = Some(n);
+        // Branch on the group that matched; a number that does not parse is ignored, never
+        // read as a marker.
+        if let (Some(j), Some(p)) = (c.get(1), c.get(2)) {
+            if let Ok(p) = p.as_str().parse() {
+                join = Some((p, j.as_str().to_owned()));
+                reason = None;
+            }
+        } else if let Some(n) = c.get(3) {
+            if let Ok(n) = n.as_str().parse() {
+                reason = Some(n);
+            }
         } else if let Some(t) = c.get(4) {
             // 264: joined from another device (longer backoff); anything else: dropped.
             reason = Some(if t.as_str().contains("another device") {
@@ -166,6 +172,11 @@ mod tests {
             let want = (Some((1, job.into())), None, true);
             assert_eq!(rejoin_events(&t), want, "{m}");
         }
+        // Overflowing numbers: ignored, not a private-server marker.
+        let big = JOINING.replace("place 1 at", "place 99999999999999999999 at");
+        assert_eq!(rejoin_events(&big), (None, None, false));
+        let big = format!("{}9", send(u32::MAX));
+        assert_eq!(rejoin_events(&big), (None, None, false));
     }
 
     // Real client 0.744 lines, IPs and ids sanitised.

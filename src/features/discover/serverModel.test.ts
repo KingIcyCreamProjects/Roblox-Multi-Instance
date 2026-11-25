@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import * as ipc from "@/lib/ipc";
 import { call, mockBus, type ServerRow, type ServersPage } from "@/lib/ipc";
 import { resetDiscoverMock } from "@/lib/mockDiscover";
 import {
@@ -82,11 +83,15 @@ test("stream accumulates pages and Stop ends it", async () => {
   const { result } = renderHook(() => useServerStream());
   await act(() => result.current.start(74260430392611, "public", null));
   // 5 s: the default 1 s is too tight on a busy machine (CI, parallel builds)
-  await waitFor(() => expect(result.current.rows.length).toBeGreaterThanOrEqual(300), {
-    timeout: 5000,
-  });
+  // pages waits too: rows is the shared buffer, so it can show page 3 one render early
+  await waitFor(
+    () => {
+      expect(result.current.rows.length).toBeGreaterThanOrEqual(300);
+      expect(result.current.pages).toBeGreaterThanOrEqual(3);
+    },
+    { timeout: 5000 },
+  );
   expect(result.current.streaming).toBe(true);
-  expect(result.current.pages).toBeGreaterThanOrEqual(3);
   expect(new Set(result.current.rows.map((r) => r.jobId)).size).toBe(result.current.rows.length);
   act(() => result.current.stop());
   const n = result.current.rows.length;
@@ -94,6 +99,36 @@ test("stream accumulates pages and Stop ends it", async () => {
   expect(result.current.rows.length).toBe(n);
   expect(result.current.streaming).toBe(false);
   expect(result.current.stopped).toBe(true); // partial: never announced as "loaded"
+});
+
+test("unmounting (tab gone, vault lock) stops the live stream", async () => {
+  resetDiscoverMock(false);
+  const spy = vi.spyOn(ipc, "call");
+  try {
+    const { result, unmount } = renderHook(() => useServerStream());
+    await act(() => result.current.start(74260430392611, "public", null));
+    unmount();
+    expect(spy).toHaveBeenCalledWith("servers_stop", { streamId: expect.any(String) });
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test("a stream id that arrives after Stop is stopped, and its rows never show", async () => {
+  resetDiscoverMock(false);
+  const spy = vi.spyOn(ipc, "call");
+  try {
+    const { result } = renderHook(() => useServerStream());
+    await act(async () => {
+      const p = result.current.start(74260430392611, "public", null);
+      result.current.stop(); // before servers_stream answered
+      await p;
+    });
+    expect(spy).toHaveBeenCalledWith("servers_stop", { streamId: expect.any(String) });
+    expect(result.current.rows).toHaveLength(0);
+  } finally {
+    spy.mockRestore();
+  }
 });
 
 test("sort by fps, kind and jobId; unknown fps last", () => {

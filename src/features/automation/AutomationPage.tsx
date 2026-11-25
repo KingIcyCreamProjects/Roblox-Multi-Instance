@@ -12,11 +12,13 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { IconButton } from "@/components/ui/IconButton";
 import { openExternal } from "@/lib/events";
 import { toast } from "@/components/Toasts";
 import { call, errMessage, type AutomationAccount } from "@/lib/ipc";
 import { reportError } from "@/lib/report";
-import { t } from "@/lib/i18n";
+import { t, type MsgKey } from "@/lib/i18n";
+import { Toggle } from "@/features/settings/controls";
 import { Controls } from "./Controls";
 import { DOCS_URL, filterLines, fmtTime, maskToken, wsUrl } from "./lib";
 import { CopyButton } from "./TokenSettings";
@@ -28,6 +30,11 @@ const levelColor: Record<string, string> = {
   error: "bg-error",
   warn: "bg-warn",
   info: "bg-ingame",
+};
+const levelName: Record<string, MsgKey> = {
+  error: "auto.level.error",
+  warn: "auto.level.warn",
+  info: "auto.level.info",
 };
 
 const inputCls =
@@ -175,21 +182,13 @@ export function RelaunchSwitch({ a }: { a: AutomationAccount }) {
         {/* idle: name the switch on screen too (the switch's own label covers screen readers) */}
         {text ?? <span aria-hidden>{t("auto.relaunch")}</span>}
       </span>
-      <label className="relative inline-flex" title={t("auto.relaunch")}>
-        <input
-          type="checkbox"
-          role="switch"
-          className="peer absolute inset-0 size-full cursor-pointer appearance-none rounded-full"
-          checked={enabled}
-          aria-label={t("auto.relaunch")}
-          aria-describedby={id}
-          onChange={(e) => set(e.target.checked, stored)}
-        />
-        <span
-          aria-hidden
-          className="relative h-5 w-[2.125rem] rounded-full bg-surface-3 shadow-[inset_0_0_0_1px_var(--hairline)] transition-colors duration-[var(--dur-quick)] peer-checked:bg-accent peer-focus-visible:shadow-[var(--focus-ring)] after:absolute after:top-[0.1875rem] after:left-[0.1875rem] after:size-3.5 after:rounded-full after:bg-text-2 peer-checked:after:bg-on-image after:shadow-[0_1px_2px_oklch(0_0_0/0.35)] after:transition-transform after:duration-[var(--dur-quick)] peer-checked:after:translate-x-3.5"
-        />
-      </label>
+      <Toggle
+        id={id}
+        checked={enabled}
+        label={t("auto.relaunch")}
+        describedBy={id}
+        onChange={(on) => set(on, stored)}
+      />
     </span>
   );
 }
@@ -325,26 +324,24 @@ function ConsoleView({ a }: { a: AutomationAccount }) {
             onChange={(e) => setQ(e.target.value)}
           />
         </div>
-        <Button
-          variant="ghost"
-          className="w-8 shrink-0 px-0!"
-          aria-label={t("auto.save")}
-          title={t("auto.save")}
+        <IconButton
+          className="shrink-0"
+          label={t("auto.save")}
           onClick={save}
           disabled={!a.console.length}
         >
           <Download size={15} strokeWidth={1.75} aria-hidden />
-        </Button>
-        <Button
-          variant="ghost"
-          className="w-8 shrink-0 px-0!"
+        </IconButton>
+        {/* the tooltip explains; the name stays short */}
+        <IconButton
+          className="shrink-0"
+          label={t("auto.clearTip")}
           aria-label={t("auto.clear")}
-          title={t("auto.clearTip")}
           onClick={() => setClearedAt(Date.now())}
           disabled={!a.console.length}
         >
           <Eraser size={15} strokeWidth={1.75} aria-hidden />
-        </Button>
+        </IconButton>
       </div>
       <div
         ref={box}
@@ -355,7 +352,7 @@ function ConsoleView({ a }: { a: AutomationAccount }) {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
-        className="relative min-h-32 flex-1 overflow-auto rounded-panel bg-field py-2 font-mono text-12 shadow-[inset_0_0_0_1px_var(--hairline)]"
+        className="relative min-h-32 flex-1 overflow-auto rounded-panel bg-field py-2 font-mono text-12 shadow-[inset_0_0_0_1px_var(--hairline)] focus-visible:shadow-[var(--focus-ring)]"
       >
         {lines.length === 0 && (
           <p className="px-3 font-sans text-13 text-text-3">
@@ -379,7 +376,9 @@ function ConsoleView({ a }: { a: AutomationAccount }) {
                     levelColor[l.level] ?? "bg-text-3",
                   )}
                 />
-                <span className="sr-only">{l.level}</span>
+                <span className="sr-only">
+                  {levelName[l.level] ? t(levelName[l.level]!) : l.level}
+                </span>
                 <span data-pii className="truncate text-text-1">
                   {l.text}
                 </span>
@@ -414,7 +413,8 @@ function SendBar({ account, connected }: { account: string; connected: boolean }
       </span>
       <input
         className="h-10 min-w-0 flex-1 rounded-full bg-field px-[18px] text-13 text-text-1 shadow-[inset_0_0_0_1px_var(--hairline)] placeholder:text-text-3 focus-visible:shadow-[var(--focus-ring)] disabled:opacity-60"
-        placeholder={connected ? t("auto.sendHint") : t("auto.sendOff", { name: account })}
+        // no name here: a placeholder can't be blurred in privacy mode ("To {name}" is beside it)
+        placeholder={connected ? t("auto.sendHint") : t("auto.notConnected")}
         aria-label={t("auto.sendHint")}
         disabled={!connected}
         value={text}

@@ -41,7 +41,7 @@ export function CopyButton({
     <Button
       sm={sm}
       variant={ghost ? "ghost" : undefined}
-      aria-label={`${t("auto.copy")}: ${label}`}
+      aria-label={t("auto.copyNamed", { what: label })}
       onClick={() => void copy()}
     >
       {done ? <Check size={14} strokeWidth={1.75} /> : <Copy size={14} strokeWidth={1.75} />}
@@ -79,13 +79,19 @@ export function TokenRows() {
     queryFn: () => call("automation_status"),
   });
   const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  // A failed regenerate keeps the confirm open and shows the error.
-  const regenerate = () =>
-    call("automation_token_regenerate").then((next) => {
-      qc.setQueryData(["autoToken"], next);
-      setConfirm(false);
-    }, reportError);
+  // A failed regenerate keeps the confirm open and shows the error. One at a time: each one
+  // disconnects every client.
+  const regenerate = () => {
+    setBusy(true);
+    return call("automation_token_regenerate")
+      .then((next) => {
+        qc.setQueryData(["autoToken"], next);
+        setConfirm(false);
+      }, reportError)
+      .finally(() => setBusy(false));
+  };
 
   if (!on) return null;
   return (
@@ -102,10 +108,10 @@ export function TokenRows() {
         <CopyButton label={t("settings.token")} />
         {confirm ? (
           <span role="group" aria-label={t("set.regenConfirm")} className="flex items-center gap-2">
-            <Button variant="danger" onClick={() => void regenerate()}>
+            <Button variant="danger" disabled={busy} onClick={() => void regenerate()}>
               {t("set.regenYes")}
             </Button>
-            <Button variant="ghost" onClick={() => setConfirm(false)}>
+            <Button variant="ghost" disabled={busy} onClick={() => setConfirm(false)}>
               {t("set.cancel")}
             </Button>
           </span>

@@ -1,12 +1,13 @@
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useUi } from "@/app/store";
 import { usePlayBar } from "@/features/playbar/store";
+import { useLaunch } from "@/features/playbar/usePlay";
 import { call } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
-import { resetAccountsMock } from "@/lib/mock";
+import { mockVault, resetAccountsMock } from "@/lib/mock";
 import { REAL_GAMES } from "@/lib/mockGames";
 import { resetDiscoverMock } from "@/lib/mockDiscover";
 import { Home } from "./Home";
@@ -77,11 +78,37 @@ test("hero Play uses the current selection before the last launched set", async 
   useUi.setState({ sel: { ids: ["acc-1"], anchor: "acc-1", cursor: "acc-1" } });
   resetAccountsMock(6);
   resetDiscoverMock(true);
+  const user = userEvent.setup();
   wrap();
   await screen.findByRole("heading", { level: 1 });
-  expect(screen.getByRole("button", { name: t("playbar.play") })).toBeEnabled();
-  localStorage.removeItem("rmi.lastLaunchSet");
-  useUi.setState({ sel: { ids: [], anchor: null, cursor: null } });
+  try {
+    await user.click(screen.getByRole("button", { name: t("playbar.play") }));
+    await waitFor(() =>
+      expect(mockVault.lastArgs.launch_start).toMatchObject({ accountIds: ["acc-1"] }),
+    );
+  } finally {
+    useLaunch.setState({ batch: null });
+    localStorage.removeItem("rmi.lastLaunchSet");
+    useUi.setState({ sel: { ids: [], anchor: null, cursor: null } });
+  }
+});
+
+test("hero Play without a selection uses the last set, minus deleted accounts", async () => {
+  localStorage.setItem("rmi.lastLaunchSet", JSON.stringify(["gone", "acc-2"]));
+  resetAccountsMock(6);
+  resetDiscoverMock(true);
+  const user = userEvent.setup();
+  wrap();
+  await screen.findByRole("heading", { level: 1 });
+  try {
+    await user.click(screen.getByRole("button", { name: t("playbar.play") }));
+    await waitFor(() =>
+      expect(mockVault.lastArgs.launch_start).toMatchObject({ accountIds: ["acc-2"] }),
+    );
+  } finally {
+    useLaunch.setState({ batch: null });
+    localStorage.removeItem("rmi.lastLaunchSet");
+  }
 });
 
 test("Online now lists only online and in-game accounts", async () => {

@@ -2,6 +2,8 @@
 
 Audit date: 2026-11-06. Working tree at `62d3177` plus the uncommitted edits present that day.
 
+> **Historical snapshot.** Later work is not covered: the `Automation.handed` set (Run here hand-over and take-back), the watcher reconnect task and its `Track` fields, the toast `locked` flag, the idle auto-lock that waits while RMI-launched clients run, and the relaunch engine's `handback` and `prev_own` fields (H3 lists the 2026-11-06 states). File:line references have drifted; search by function name.
+
 **What counts.** An implicit state machine is anything that moves through phases over time without one explicit state type that owns its transitions. That covers:
 - bools, Options, refs or nulls that together encode a phase
 - status strings compared in several places
@@ -235,7 +237,7 @@ Also, `lock()` bumps the generation even when the vault is already locked (`vaul
   - **REACHABLE: lock mid-batch.**
     - The remaining accounts fail one by one with LOCKED (`:345`).
     - The account already in flight still reaches `open_uri` (`:425`).
-  - **THEORETICAL harm: two window pollers.** The detached `setup_window` keeps polling for up to 45 s after `Flight` drops (`:455-464`), so a quick relaunch of the same account gets two pollers.
+  - **THEORETICAL harm: two window pollers.** The detached `setup_window` keeps polling for up to 45 s (180 s plus 15 s of re-minimizing with `launch.startMinimized`) after `Flight` drops (`:455-464`), so a quick relaunch of the same account gets two pollers.
 **Fixed:** `launcher.rs`: ticket fetched before any local side effect, cancel checked once at a commit point, then FPS write, close and open always finish together (cancel never leaves no client); `STATUS` keeps `accounts: {id: {state, message, gameName}}`; batches run one at a time via a `TURN` mutex (cancel skips the wait); vault `lock()` calls `cancel_all()` and `launch_one` re-checks the lock generation at the commit point and right before `open_uri`; `Own` drop guard removes the batch and always emits `launch://done`; `setup_window` (`platform/windows.rs`) exits when a newer poll for the same tracker starts.
 
 ### H7. Watcher per-client tracking (`Track`): IMPLICIT ✔
@@ -255,7 +257,7 @@ Also, `lock()` bumps the generation even when the vault is already locked (`vaul
   - **THEORETICAL-ish: endless log re-reads.** `srv == Unknown` keeps a client unsettled forever, so the log directory is re-read on every scan (`:285`).
   - **THEORETICAL: half-updated state and a small leak.** A panic caught mid-scan (`:511`) leaves a half-updated `Track`. `fires` keys for unmapped pids are never removed.
 - **Why HIGH:** it decides which processes get killed.
-**Fixed:** `watcher/win.rs`: `Track::repick` resets `srv`, `idle_since`, `last_event` with the log fields; logs are claimed oldest client first; re-picking stops once a client is past `LOG_AFTER_MS` (no endless directory reads); a caught scan panic clears all tracks; an exited client drops its `pid:` cooldown key.
+**Fixed:** `watcher/win.rs`: `Track::repick` resets `srv`, `idle_since`, `last_event` with the log fields; logs are claimed oldest client first; re-picking stops once a client is past `LOG_AFTER_MS` (no endless directory reads); a caught scan panic clears all tracks (debug builds only: release builds abort on panic); an exited client drops its `pid:` cooldown key.
 
 ### H8. Vault lock lifecycle (Rust): IMPLICIT
 - **Where:**
@@ -340,6 +342,7 @@ Also, `lock()` bumps the generation even when the vault is already locked (`vaul
     - REACHABLE: `MultiBanner`'s `gone` flag never resets (`PlayBar.tsx:565`).
     - REACHABLE: turning multi off and back on while clients run stays blocked until every client closes, and the UI never explains why.
   - **Fixed:** `["roblox"]` was already invalidated by `settings_set`/`multi_set` (`state_changed`), so the banner now appears and explains the block; `MultiBanner` (`PlayBar.tsx`) mounts only while blocked, so its dismiss resets. The getter-as-retry design smell is kept.
+  - **Later:** `roblox_running` returns `Option<bool>`; a failed process snapshot is unknown, never "nothing runs". The mutex stays held, auto-relaunch marks nobody exited, login start and watcher reconnect launch nothing, a hand-over counts every client as still running, the friend account list answers 503 "try again", and settings sidecars are restored only on a sure "no client runs". With multi-instance unavailable `start_batch` refuses more than one account (`ONE_CLIENT`).
 
 ### Automation
 
@@ -576,7 +579,7 @@ Also, `lock()` bumps the generation even when the vault is already locked (`vaul
 ## LOW
 
 ### Launch / watcher
-- `setup_window` polls every 500 ms for 45 s, detached, with no cancel (`platform/windows.rs:340-372`, `launcher.rs:455`).
+- `setup_window` polls every 100 ms for the first 10 s, then every 500 ms, detached, until the window shows or 45 s pass (180 s with `launch.startMinimized`); a minimized launch then re-minimizes it every 200 ms for another 15 s (`REMINIMIZE_FOR`). A newer poll for the same tracker cancels it (`platform/windows.rs` `setup_window`, `poll_interval`).
 - `close_verified` runs WM_CLOSE, waits 1 s, terminates, waits 2 s (`windows.rs:707-726`). Sequential and correct.
 - `hadFocus` plus the `running` effect refocuses Play after a batch settles; `hadFocus` goes stale across entry points (`PlayBar.tsx:510-513, 608-614`).
 - `Slot` animation `flight`/`landed` timers (`PlayBar.tsx:319-350`).
@@ -652,13 +655,13 @@ Also, `lock()` bumps the generation even when the vault is already locked (`vaul
 
 ### App core
 - NumberCtl draft plus a 400 ms debounce: unmount clears the timer, so a change followed by a lock within 400 ms loses the save (`controls.tsx:90-126`).
-  **Fixed:** unmount runs the pending debounced save instead of dropping it (`controls.tsx`).
+  **Superseded:** NumberCtl has no timer now. Every Settings edit goes to the unsaved-edits store `useDraft` (`settings/draft.ts`: `edits`, `setAll`, `clear`, `dropSent`) with no IPC; the Save and Discard bar (`SettingsPage.tsx`) owns the rest. Save sends the edits through `KEY_SET` and `dropSent` removes only what was sent; Discard clears; leaving the page keeps the edits (module store) unsaved until Save or Discard. P1's optimistic `KEY_SET` path still applies to that Save and to saves that bypass the draft (Shell toggles such as privacy mode).
 - `settings_set` runs its side effects outside the settings lock; concurrent saves reconcile in any order but converge (`commands.rs:54-60`).
   **Fixed:** each side effect reads the current settings (so the last one converges), and `settings_set` now returns the settings read after them rather than its own snapshot (`commands.rs`).
 - Tray existence decides close vs. quit: a failed tray `create` silently means quit on close (`shell.rs:261-296, 325-332`).
   **Fixed:** `on_close` retries the tray build first (`sync_tray`), and logs a warning when the tray is enabled but missing, so close quits (`shell.rs`).
 - The `automation` route has no guard and survives `automation.enabled = false` (`store.ts:154, 203`; `Sidebar.tsx:22`).
-  **Fixed:** the Shell doesn't render the page while automation is off and goes to Home (`Shell.tsx`).
+  **Fixed:** the Shell doesn't render the page while automation is off and goes to Accounts (`Shell.tsx`). While a remote session window is open `go()` does nothing, so the route stays `automation` (page not rendered) until the session closes.
 - `lastError` is a single global slot where the last write wins (`store.ts:14`, `report.ts:14`, `Shell.tsx:89-101`).
   **Fixed:** later errors queue behind the shown one in `moreErrors` (duplicates dropped, at most 5); each dismiss shows the next (`store.ts`).
 

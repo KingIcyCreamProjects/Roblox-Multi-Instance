@@ -5,7 +5,11 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  type DragCancelEvent,
   type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+  type UniqueIdentifier,
 } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -56,6 +60,19 @@ export function undoOrder(qc: QueryClient, at: number, id: string): string[] {
   return ids;
 }
 
+/** "Removed {name}" with Undo, which adds it back at its old position `at`. Every remove of a
+ *  favourite (this tab, the Games star) gives the same way back. */
+export function removedToast(qc: QueryClient, f: Favorite, at: number) {
+  toast(t("favs.removed", { name: f.name }), {
+    label: t("accounts.undo"),
+    run: () =>
+      void call("favorites_add", { placeId: f.placeId, name: f.name, privateLink: f.privateLink })
+        .then((back) => call("favorites_reorder", { ids: undoOrder(qc, at, back.id) }))
+        .catch(reportError)
+        .finally(() => void qc.invalidateQueries({ queryKey: FAV_KEY })),
+  });
+}
+
 export function Favorites() {
   const qc = useQueryClient();
   const [pick, setPick] = useState<string | null>(null);
@@ -85,6 +102,22 @@ export function Favorites() {
     optimistic(() => next);
     call("favorites_reorder", { ids: next.map((f) => f.id) }).catch(resync);
   };
+  // screen readers hear the game's name in catalog text, not dnd-kit's English and raw ids
+  const nameOf = (id: UniqueIdentifier) => q.data?.find((f) => f.id === id)?.name ?? "";
+  const accessibility = {
+    screenReaderInstructions: { draggable: t("favs.dnd.help") },
+    announcements: {
+      onDragStart: ({ active }: DragStartEvent) => t("favs.dnd.start", { name: nameOf(active.id) }),
+      onDragOver: ({ active, over }: DragOverEvent) =>
+        over ? t("favs.dnd.over", { name: nameOf(active.id), to: nameOf(over.id) }) : undefined,
+      onDragEnd: ({ active, over }: DragEndEvent) =>
+        over
+          ? t("favs.dnd.end", { name: nameOf(active.id), to: nameOf(over.id) })
+          : t("favs.dnd.cancel", { name: nameOf(active.id) }),
+      onDragCancel: ({ active }: DragCancelEvent) =>
+        t("favs.dnd.cancel", { name: nameOf(active.id) }),
+    },
+  };
   const update = (f: Favorite, patch: { name?: string; privateLink?: string | null }) => {
     optimistic((l) => l?.map((x) => (x.id === f.id ? { ...x, ...patch } : x)));
     call("favorites_update", { id: f.id, patch }).catch(resync);
@@ -92,22 +125,7 @@ export function Favorites() {
   const remove = (f: Favorite) => {
     const at = (q.data ?? []).findIndex((x) => x.id === f.id);
     optimistic((l) => l?.filter((x) => x.id !== f.id));
-    call("favorites_remove", { id: f.id }).then(
-      () =>
-        toast(t("favs.removed", { name: f.name }), {
-          label: t("accounts.undo"),
-          run: () =>
-            void call("favorites_add", {
-              placeId: f.placeId,
-              name: f.name,
-              privateLink: f.privateLink,
-            })
-              .then((back) => call("favorites_reorder", { ids: undoOrder(qc, at, back.id) }))
-              .catch(reportError)
-              .finally(() => void qc.invalidateQueries({ queryKey: FAV_KEY })),
-        }),
-      resync,
-    );
+    call("favorites_remove", { id: f.id }).then(() => removedToast(qc, f, at), resync);
   };
 
   let body;
@@ -127,7 +145,12 @@ export function Favorites() {
   else if (!q.data.length) body = <Quiet>{t("favs.empty")}</Quiet>;
   else
     body = (
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={onDragEnd}
+        accessibility={accessibility}
+      >
         <SortableContext items={q.data.map((f) => f.id)} strategy={verticalListSortingStrategy}>
           <ul className="flex flex-col gap-0.5" aria-label={t("favs.title")}>
             {q.data.map((f) => (
@@ -296,6 +319,7 @@ function Recents() {
     meta: { silent: true },
   });
   const [clearing, setClearing] = useState(false);
+  const [asking, setAsking] = useState(false);
   const clear = async () => {
     setClearing(true);
     try {
@@ -342,14 +366,36 @@ function Recents() {
         <h2 id="recents-h" className="flex-1 text-12 font-medium text-text-3">
           {t("recents.title")}
         </h2>
-        <Button
-          sm
-          variant="ghost"
-          disabled={!q.data?.length || clearing}
-          onClick={() => void clear()}
-        >
-          {clearing ? t("recents.clearing") : t("recents.clear")}
-        </Button>
+        {/* the whole history, no undo: asks first, like Unblock all */}
+        {asking ? (
+          <>
+            <span role="status" className="text-13 text-text-2">
+              {t("recents.clearAsk")}
+            </span>
+            <Button
+              sm
+              variant="danger"
+              onClick={() => {
+                setAsking(false);
+                void clear();
+              }}
+            >
+              {t("recents.clear")}
+            </Button>
+            <Button autoFocus sm variant="ghost" onClick={() => setAsking(false)}>
+              {t("set.cancel")}
+            </Button>
+          </>
+        ) : (
+          <Button
+            sm
+            variant="ghost"
+            disabled={!q.data?.length || clearing}
+            onClick={() => setAsking(true)}
+          >
+            {clearing ? t("recents.clearing") : t("recents.clear")}
+          </Button>
+        )}
       </div>
       {body}
     </section>

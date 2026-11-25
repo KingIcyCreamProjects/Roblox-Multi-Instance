@@ -69,7 +69,7 @@ pub async fn grid_arrange(
 ) -> CmdResult<usize> {
     #[cfg(any(windows, target_os = "macos"))]
     {
-        let saved = state.settings.lock().unwrap()["gridArrange"].clone();
+        let saved = state.settings.lock().unwrap_or_else(|e| e.into_inner())["gridArrange"].clone();
         let monitor = monitor.or_else(|| saved["monitor"].as_str().map(String::from));
         let wanted: Vec<String> = order
             .or_else(|| serde_json::from_value(saved["order"].clone()).ok())
@@ -179,7 +179,9 @@ pub async fn grid_identify(app: tauri::AppHandle, order: Option<Vec<String>>) ->
             let state = app.state::<AppState>();
             let wanted: Vec<String> = order
                 .or_else(|| {
-                    let saved = state.settings.lock().unwrap()["gridArrange"]["order"].clone();
+                    let saved = state.settings.lock().unwrap_or_else(|e| e.into_inner())
+                        ["gridArrange"]["order"]
+                        .clone();
                     serde_json::from_value(saved).ok()
                 })
                 .unwrap_or_default();
@@ -196,7 +198,9 @@ pub async fn grid_identify(app: tauri::AppHandle, order: Option<Vec<String>>) ->
             let state = a.state::<AppState>();
             let wanted: Vec<String> = order
                 .or_else(|| {
-                    let saved = state.settings.lock().unwrap()["gridArrange"]["order"].clone();
+                    let saved = state.settings.lock().unwrap_or_else(|e| e.into_inner())
+                        ["gridArrange"]["order"]
+                        .clone();
                     serde_json::from_value(saved).ok()
                 })
                 .unwrap_or_default();
@@ -287,9 +291,30 @@ pub async fn grid_windows(app: tauri::AppHandle) -> GridWindows {
     }
 }
 
-#[tauri::command]
+// async: off the main thread, which would stall on a settings lock held across a save.
+#[tauri::command(async)]
 pub fn settings_get(state: State<'_, AppState>) -> Value {
-    state.settings.lock().unwrap().clone()
+    state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Run blocking command work (Argon2, the OS key store, fsynced saves, the mutex holder
+/// spawn) off the async workers.
+pub(crate) async fn blocking<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    f: impl FnOnce(&AppState) -> CmdResult<T> + Send + 'static,
+) -> CmdResult<T> {
+    let h = app.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&h.state::<AppState>()))
+        .await
+        .map_err(|e| format!("internal error: {e}"))?
+}
+
+async fn persist_blocking(app: &tauri::AppHandle, patch: Value) -> CmdResult<Value> {
+    blocking(app, move |s| persist(s, &patch)).await
 }
 
 #[tauri::command]
@@ -298,10 +323,14 @@ pub async fn settings_set(
     state: State<'_, AppState>,
     patch: Value,
 ) -> CmdResult<Value> {
-    let prev = patch
-        .get("friend")
-        .map(|_| state.settings.lock().unwrap().clone());
-    let next = persist(&state, &patch)?;
+    let prev = patch.get("friend").map(|_| {
+        state
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    });
+    let next = persist_blocking(&app, patch.clone()).await?;
     // Remote off, moved or address cleared: drop RMI's Funnel entry for the old port first, so
     // it can't expose whatever listens there later. A failure only logs; the save stands.
     let prev = prev.as_ref();
@@ -317,6 +346,13 @@ pub async fn settings_set(
         }
     }
     let moved = prev.and_then(|p| crate::friend::tailscale::moved_port(p, &next));
+    let off = |p: &str| patch.pointer(p) == Some(&Value::Bool(false));
+    if off("/fps/unlock") || off("/graphics/set") {
+        let h = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            restore_basic_settings(&h.state::<AppState>(), false)
+        });
+    }
     if patch.get("multi").is_some() {
         state_changed(&app, &["roblox"]); // multiActive / cookieLockActive moved
     }
@@ -333,9 +369,15 @@ pub async fn settings_set(
     let r = state.automation.reconcile().await;
     state_changed(&app, &["autoStatus"]); // running or not, on whichever path
 
-    // Friend enabled / port may have changed too.
-    let fr = friend_sync(&app).await;
-    // Port moved while on: Funnel on for the new port, only once the friend server holds it
+    // Friend enabled / port may have changed too. Only friend patches wait on (and report)
+    // its bind: a port held by another program must not stall unrelated saves.
+    let fr = if prev.is_some() {
+        friend_sync(&app).await
+    } else {
+        Ok(())
+    };
+    // Port moved while on, or the remote switched back on with an RMI-made address: Funnel
+    // on for the port, only once the friend server holds it
     // (else another program listening there would be public). Its address may differ
     // (another Funnel port was free); if the bind or this fails the address is cleared, so
     // the setup shows again instead of a dead link.
@@ -371,31 +413,64 @@ pub async fn settings_set(
     // Remote access: listen, move or stop (and end a live session when switched off).
     state.remote.sync().await;
     state_changed(&app, &["remoteStatus"]);
+    // Coded errors (the page branches on them): the details go to the log. Autostart first:
+    // on AUTOSTART_FAILED the page keeps the rolled-back launchOnLogin edit; SETTINGS_PARTIAL
+    // would mark it saved too.
+    if let Err(e) = os {
+        log::error!("{e}");
+        if let Err(e) = r.and(fr) {
+            log::error!("server restart failed too: {e}");
+        }
+        state_changed(&app, &["settings"]); // launchOnLogin was put back
+        return Err(AUTOSTART_FAILED.into());
+    }
     if let Err(e) = r {
         log::error!("automation restart failed: {e}");
-        return Err(format!(
-            "Settings saved, but the automation servers could not restart: {e}"
-        ));
+        return Err(SETTINGS_PARTIAL.into());
     }
     if let Err(e) = fr {
         log::error!("friend server restart failed: {e}");
-        return Err(format!(
-            "Settings saved, but the friend server could not start: {e}"
-        ));
-    }
-    if let Err(e) = os {
-        state_changed(&app, &["settings"]); // launchOnLogin was put back
-        return Err(e);
+        return Err(SETTINGS_PARTIAL.into());
     }
     // Current settings, not this save's snapshot: a faster later save may have landed meanwhile.
-    let now = state.settings.lock().unwrap().clone();
+    let now = state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     Ok(now)
+}
+
+pub const SETTINGS_PARTIAL: &str = "SETTINGS_PARTIAL";
+pub const AUTOSTART_FAILED: &str = "AUTOSTART_FAILED";
+
+/// Give Roblox back the user's own graphics quality and FPS where RMI's override is now off
+/// (`all`: both, at exit). Blocking (process snapshot, file IO). Only while no Roblox runs:
+/// a client closing later rewrites the file with the value it started with, after the
+/// user's recorded copy was used up; the next launch or exit tries again.
+pub(crate) fn restore_basic_settings(st: &AppState, all: bool) {
+    if st.platform.roblox_running() != Some(false) {
+        return;
+    }
+    let (fps, quality) = if all {
+        (None, None)
+    } else {
+        let s = st
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::launch::launcher::start_caps(None, None, &s)
+    };
+    if let Err(e) = crate::launch::basicsettings::write(&st.paths.root, quality, fps) {
+        log::warn!("restoring Roblox's graphics settings failed: {e}");
+    }
 }
 
 /// Save a settings patch, then re-apply the multi-instance guards to match. Read-only mode
 /// (file unreadable at startup, never overwritten): applies in memory only, for this session.
 pub(crate) fn persist(state: &AppState, patch: &Value) -> CmdResult<Value> {
-    let mut cur = state.settings.lock().unwrap();
+    let mut cur = state.settings.lock().unwrap_or_else(|e| e.into_inner());
     let next = settings::apply_patch(&cur, patch)?;
     if !state.settings_read_only {
         let path = state.paths.settings();
@@ -464,7 +539,7 @@ fn want_multi(state: &AppState, s: &Value) -> bool {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_some_and(|g| g.alive())
-            && state.platform.roblox_running())
+            && state.platform.roblox_running() != Some(false))
 }
 
 fn sync(
@@ -486,6 +561,11 @@ fn sync(
     }
     if g.take().is_some() {
         log::warn!("{what} lost (holder gone); taking it again");
+    }
+    // Isolated debug instance (`RMI_DATA_DIR`, E2E): the mutex holder and cookie file belong
+    // to the installed RMI; never attach to (or later signal) them.
+    if crate::paths::override_dir().is_some() {
+        return Ok(());
     }
     match acquire() {
         Ok(x) => {
@@ -539,7 +619,7 @@ fn roblox_status_now(state: &AppState) -> RobloxStatus {
     let held = |m: &Mutex<Option<Guard>>| m.lock().unwrap_or_else(|e| e.into_inner()).is_some();
     // Taken by someone else: only Roblox blocks multi-client; another RMI holding it is fine.
     let blocked = matches!(ensure_multi(state), Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists)
-        && state.platform.roblox_running();
+        && state.platform.roblox_running() != Some(false);
     let install = state.platform.roblox_install();
     install_changed(install.as_ref()); // the UI has this one now
                                        // Own statements: a guard temporary inside the struct literal would live to its end.
@@ -559,7 +639,7 @@ fn roblox_status_now(state: &AppState) -> RobloxStatus {
         version_dir: install
             .and_then(|i| i.version_dir)
             .map(|d| d.display().to_string()),
-        running: state.platform.roblox_running(),
+        running: state.platform.roblox_running() != Some(false),
         multi_active: held(&state.multi_guard),
         cookie_lock_active: held(&state.cookie_guard),
         multi_blocked_by_running_roblox: blocked,
@@ -642,42 +722,37 @@ pub(crate) fn read_client_settings(p: &std::path::Path) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-pub async fn multi_set(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> CmdResult<Value> {
-    let next = persist(&state, &json!({ "multi": { "enabled": enabled } }))?;
+pub async fn multi_set(app: tauri::AppHandle, enabled: bool) -> CmdResult<Value> {
+    let next = persist_blocking(&app, json!({ "multi": { "enabled": enabled } })).await?;
     state_changed(&app, &["settings", "roblox"]);
     Ok(next)
 }
 
 #[tauri::command]
-pub async fn cookie_lock_set(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> CmdResult<Value> {
-    let next = persist(&state, &json!({ "multi": { "cookieLock": enabled } }))?;
+pub async fn cookie_lock_set(app: tauri::AppHandle, enabled: bool) -> CmdResult<Value> {
+    let next = persist_blocking(&app, json!({ "multi": { "cookieLock": enabled } })).await?;
     state_changed(&app, &["settings", "roblox"]);
     Ok(next)
 }
 
 #[tauri::command(async)]
 pub fn watcher_status(state: State<'_, AppState>) -> crate::watcher::Status {
-    let cfg = crate::watcher::rules::Cfg::from_settings(&state.settings.lock().unwrap());
+    let cfg = crate::watcher::rules::Cfg::from_settings(
+        &state.settings.lock().unwrap_or_else(|e| e.into_inner()),
+    );
     state.watcher.status(&cfg)
 }
 
 /// Close one Roblox client (RobloxPlayerBeta.exe pids only).
 #[tauri::command]
-pub async fn watcher_kill(state: State<'_, AppState>, pid: u32) -> CmdResult<()> {
-    if !state.platform.capabilities().watcher {
-        return Err("The client watcher is only available on Windows.".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || crate::watcher::kill_client(pid))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn watcher_kill(app: tauri::AppHandle, pid: u32) -> CmdResult<()> {
+    blocking(&app, move |s| {
+        if !s.platform.capabilities().watcher {
+            return Err("The client watcher is only available on Windows.".into());
+        }
+        crate::watcher::kill_client(pid)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -705,8 +780,9 @@ pub fn open_folder(
 }
 
 #[tauri::command]
-pub async fn platform_capabilities(state: State<'_, AppState>) -> CmdResult<Capabilities> {
-    Ok(state.platform.capabilities())
+pub async fn platform_capabilities(app: tauri::AppHandle) -> CmdResult<Capabilities> {
+    // probes the registry and files (Linux: spawns flatpak / pasta): off the async workers
+    blocking(&app, |s| Ok(s.platform.capabilities())).await
 }
 
 #[derive(Serialize)]
@@ -1016,18 +1092,21 @@ pub async fn automation_save_console(
         .hub
         .console_text(&account)
         .ok_or_else(|| format!("{account} has no console"))?;
-    let Some(path) = app
+    let d = app
         .dialog()
         .file()
         .set_file_name(format!("{}-console.txt", safe_name(&account)))
-        .add_filter("Text", &["txt"])
-        .blocking_save_file()
-    else {
-        return Ok(false);
-    };
-    let path = path.into_path().map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("Could not save the console: {e}"))?;
-    Ok(true)
+        .add_filter("Text", &["txt"]);
+    // The dialog waits for the user and the write hits disk: off the async workers.
+    blocking(&app, move |_| {
+        let Some(path) = d.blocking_save_file() else {
+            return Ok(false);
+        };
+        let path = path.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&path, text).map_err(|e| format!("Could not save the console: {e}"))?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1279,7 +1358,6 @@ pub async fn vault_status(state: State<'_, AppState>) -> CmdResult<VaultStatus> 
 #[tauri::command]
 pub async fn vault_create(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     mode: String,
     password: Option<String>,
 ) -> CmdResult<()> {
@@ -1297,33 +1375,37 @@ pub async fn vault_create(
     }
     let _turn = Turn;
     let password = password.map(Zeroizing::new);
-    let c = Ctx::of(&state);
-    let start = c.gen_now();
-    if Vault::exists(&c.vault) {
-        return Err("A vault already exists.".into());
-    }
-    let mode = match (mode.as_str(), password) {
-        ("os", _) => CreateMode::Os,
-        ("password", Some(pw)) => {
-            check_pw(&pw)?;
-            CreateMode::Password(pw)
+    blocking(&app, move |state| {
+        let c = Ctx::of(state);
+        let start = c.gen_now();
+        if Vault::exists(&c.vault) {
+            return Err("A vault already exists.".into());
         }
-        ("password", None) => return Err("Enter a password.".into()),
-        _ => return Err("Unknown vault mode.".into()),
-    };
-    let v = Vault::create(&c.vault, mode, state.os().map_err(verr)?).map_err(|e| match e {
-        VaultError::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists => {
-            "A vault already exists.".into()
+        let mode = match (mode.as_str(), password) {
+            ("os", _) => CreateMode::Os,
+            ("password", Some(pw)) => {
+                check_pw(&pw)?;
+                CreateMode::Password(pw)
+            }
+            ("password", None) => return Err("Enter a password.".into()),
+            _ => return Err("Unknown vault mode.".into()),
+        };
+        let v = Vault::create(&c.vault, mode, state.os().map_err(verr)?).map_err(|e| match e {
+            VaultError::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists => {
+                "A vault already exists.".into()
+            }
+            e => verr(e),
+        })?;
+        log::info!("vault created");
+        c.touch();
+        // Lock wins: a Lock during Argon2 leaves the new vault created but locked. Not an
+        // error, the vault exists; the gate refetch shows Unlock.
+        if insert_if_current(&c, start, v, |_| Ok(())).is_err() {
+            log::info!("vault created, then locked before it opened");
         }
-        e => verr(e),
-    })?;
-    log::info!("vault created");
-    c.touch();
-    // Lock wins: a Lock during Argon2 leaves the new vault created but locked. Not an error,
-    // the vault exists; the gate refetch shows Unlock.
-    if insert_if_current(&c, start, v, |_| Ok(())).is_err() {
-        log::info!("vault created, then locked before it opened");
-    }
+        Ok(())
+    })
+    .await?;
     state_changed(&app, &["vault"]);
     crate::accounts::cmds::emit_changed(&app);
     Ok(())
@@ -1365,6 +1447,7 @@ fn unlock_impl(
             if k.mode() == Mode::Password && !k.verify_password(pw).map_err(verr)? {
                 return Err(VaultError::WrongPassword.to_string());
             }
+            start.check(c.gen)?; // locked during Argon2: lock wins, the cache stays as it was
             apply_remember(c, &*os, true, remember, k.mode(), k.dk());
         }
         return Ok(());
@@ -1432,24 +1515,26 @@ fn unlock_impl(
 #[tauri::command]
 pub async fn vault_unlock(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     password: Option<String>,
     remember: bool,
 ) -> CmdResult<()> {
     let password = password.map(Zeroizing::new);
-    let c = Ctx::of(&state);
-    let start = c.gen_now();
-    if !Vault::exists(&c.vault) {
-        return Err("No vault yet.".into()); // before os(): never mint a device key without a vault
-    }
-    let os = state.os().map_err(verr)?;
-    unlock_impl(
-        &c,
-        start,
-        os,
-        password.as_deref().map(|s| s.as_str()),
-        remember,
-    )?;
+    blocking(&app, move |state| {
+        let c = Ctx::of(state);
+        let start = c.gen_now();
+        if !Vault::exists(&c.vault) {
+            return Err("No vault yet.".into()); // before os(): never mint a device key without a vault
+        }
+        let os = state.os().map_err(verr)?;
+        unlock_impl(
+            &c,
+            start,
+            os,
+            password.as_deref().map(|s| s.as_str()),
+            remember,
+        )
+    })
+    .await?;
     log::info!("vault unlocked");
     state_changed(&app, &["vault"]);
     crate::accounts::cmds::emit_changed(&app);
@@ -1462,17 +1547,27 @@ pub async fn vault_lock(app: tauri::AppHandle) -> CmdResult<()> {
     Ok(())
 }
 
-fn change_password_impl(c: &Ctx, current: Option<&str>, new: Option<&str>) -> CmdResult<()> {
+fn change_password_impl(
+    c: &Ctx,
+    start: Gen,
+    current: Option<&str>,
+    new: Option<&str>,
+) -> CmdResult<()> {
     if let Some(pw) = new {
         check_pw(pw)?;
     }
     require_password(c.slot, current)?;
     let k = keys(c.slot)?;
     let h = k.rewrap(new).map_err(verr)?;
-    // Cache first: the DK never changes, so a cache left by a crash after the re-wrap would
-    // still open the vault without the new password. A failed re-wrap just costs a re-type.
-    vault::cache_remove(&c.cache);
-    with_vault(c.slot, |v| v.apply_rewrap(&k, h).map_err(verr))?;
+    with_vault(c.slot, |v| {
+        // Locked (and maybe reopened) during the prompt or Argon2: lock wins, nothing changes.
+        start.check(c.gen)?;
+        // Cache first: the DK never changes, so a cache left by a crash after the re-wrap
+        // would still open the vault without the new password. A failed re-wrap just costs a
+        // re-type.
+        vault::cache_remove(&c.cache);
+        v.apply_rewrap(&k, h).map_err(verr)
+    })?;
     c.touch();
     Ok(())
 }
@@ -1485,16 +1580,22 @@ pub async fn vault_change_password(
     new: Option<String>,
 ) -> CmdResult<()> {
     let (current, new) = (current.map(Zeroizing::new), new.map(Zeroizing::new));
-    // OS mode has no current password to check: confirm presence, the same gate as the exports
-    // (switching to a password the caller picks would otherwise unlock them without it).
-    // Without Windows Hello on the device: the plain OK / Cancel dialog, since giving the
-    // vault a password is that user's way out and must stay possible.
+    let start = Ctx::of(&state).gen_now();
+    keys(&state.vault)?; // fail fast when locked (before the OS prompt)
+                         // OS mode has no current password to check: confirm presence, the same gate as the exports
+                         // (switching to a password the caller picks would otherwise unlock them without it).
+                         // Without Windows Hello on the device: the plain OK / Cancel dialog, since giving the
+                         // vault a password is that user's way out and must stay possible.
     crate::accounts::cmds::os_presence(&app, &state, true).await?;
-    change_password_impl(
-        &Ctx::of(&state),
-        current.as_deref().map(|s| s.as_str()),
-        new.as_deref().map(|s| s.as_str()),
-    )?;
+    blocking(&app, move |state| {
+        change_password_impl(
+            &Ctx::of(state),
+            start,
+            current.as_deref().map(|s| s.as_str()),
+            new.as_deref().map(|s| s.as_str()),
+        )
+    })
+    .await?;
     log::info!("vault key re-wrapped");
     Ok(())
 }
@@ -1618,17 +1719,19 @@ fn restore_impl(
 #[tauri::command]
 pub async fn vault_restore(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     name: String,
     password: Option<String>,
 ) -> CmdResult<()> {
     let password = password.map(Zeroizing::new);
-    restore_impl(
-        &Ctx::of(&state),
-        &name,
-        password.as_deref().map(|s| s.as_str()),
-        || state.os().map_err(verr),
-    )?;
+    blocking(&app, move |state| {
+        restore_impl(
+            &Ctx::of(state),
+            &name,
+            password.as_deref().map(|s| s.as_str()),
+            || state.os().map_err(verr),
+        )
+    })
+    .await?;
     log::info!("vault restored from backup");
     crate::accounts::cmds::emit_changed(&app);
     Ok(())
@@ -1659,16 +1762,18 @@ pub async fn vault_export_encrypted(
 ) -> CmdResult<()> {
     let password = Zeroizing::new(password);
     let current = current.map(Zeroizing::new);
-    let c = Ctx::of(&state);
-    keys(c.slot)?; // fail fast when locked (before touching the OS store)
+    keys(&state.vault)?; // fail fast when locked (before touching the OS store)
     crate::accounts::cmds::os_presence(&app, &state, false).await?;
-    export_encrypted_impl(
-        &c,
-        &*state.os().map_err(verr)?,
-        &path,
-        &password,
-        current.as_deref().map(|s| s.as_str()),
-    )?;
+    blocking(&app, move |state| {
+        export_encrypted_impl(
+            &Ctx::of(state),
+            &*state.os().map_err(verr)?,
+            &path,
+            &password,
+            current.as_deref().map(|s| s.as_str()),
+        )
+    })
+    .await?;
     log::info!("vault exported (encrypted)");
     Ok(())
 }
@@ -1692,22 +1797,34 @@ pub async fn vault_export_plain(
 ) -> CmdResult<()> {
     let password = password.map(Zeroizing::new);
     vault::check_plain_confirm(&confirm)?; // before any OS prompt
+    keys(&state.vault)?; // fail fast when locked (before the OS prompt)
     crate::accounts::cmds::os_presence(&app, &state, false).await?;
-    export_plain_impl(
-        &Ctx::of(&state),
-        &path,
-        &confirm,
-        password.as_deref().map(|s| s.as_str()),
-    )?;
+    blocking(&app, move |state| {
+        export_plain_impl(
+            &Ctx::of(state),
+            &path,
+            &confirm,
+            password.as_deref().map(|s| s.as_str()),
+        )
+    })
+    .await?;
     log::warn!("vault exported as plaintext");
     Ok(())
 }
+
+/// Largest vault file `vault_import_file` reads.
+const IMPORT_MAX: u64 = 64 << 20;
 
 /// Replace the current payload with the one in another vault file (any mode). The current
 /// file is backed up first (required); memory changes only after the write succeeds.
 fn import_impl(c: &Ctx, os: Arc<dyn OsWrap>, path: &str, password: Option<&str>) -> CmdResult<()> {
     let start = c.gen_now();
     keys(c.slot)?; // fail fast when locked
+                   // Byte cap before the whole-file read (a huge pick would abort on allocation).
+    let len = std::fs::metadata(path).map_err(|e| verr(e.into()))?.len();
+    if len > IMPORT_MAX {
+        return Err("That file is too large to be a vault.".into());
+    }
     let src = Vault::open(Path::new(path), password, os).map_err(verr)?;
     with_vault(c.slot, |v| {
         start.check(c.gen)?; // locked (and maybe reopened) while reading the source
@@ -1720,19 +1837,21 @@ fn import_impl(c: &Ctx, os: Arc<dyn OsWrap>, path: &str, password: Option<&str>)
 #[tauri::command]
 pub async fn vault_import_file(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     path: String,
     password: Option<String>,
 ) -> CmdResult<()> {
     let password = password.map(Zeroizing::new);
-    let c = Ctx::of(&state);
-    keys(c.slot)?;
-    import_impl(
-        &c,
-        state.os().map_err(verr)?,
-        &path,
-        password.as_deref().map(|s| s.as_str()),
-    )?;
+    blocking(&app, move |state| {
+        let c = Ctx::of(state);
+        keys(c.slot)?;
+        import_impl(
+            &c,
+            state.os().map_err(verr)?,
+            &path,
+            password.as_deref().map(|s| s.as_str()),
+        )
+    })
+    .await?;
     log::info!("vault imported from file");
     crate::accounts::cmds::emit_changed(&app);
     Ok(())
@@ -1790,6 +1909,19 @@ mod tests {
     }
 
     #[test]
+    fn failed_settings_save_keeps_memory() {
+        let d = tempfile::tempdir().unwrap();
+        let rc =
+            crate::roblox::RobloxClient::new(crate::roblox::BaseUrls::all("http://127.0.0.1:9"));
+        let st = crate::test_state(d.path(), rc);
+        let before = st.settings.lock().unwrap().clone();
+        // a directory where the temp file goes: the save fails
+        std::fs::create_dir(st.paths.root.join("settings.json.tmp")).unwrap();
+        assert!(persist(&st, &json!({ "fps": { "value": 30 } })).is_err());
+        assert_eq!(*st.settings.lock().unwrap(), before);
+    }
+
+    #[test]
     fn status_reports_in_process_mutex_without_deadlock() {
         struct InProc;
         impl crate::platform::Held for InProc {
@@ -1816,6 +1948,39 @@ mod tests {
         *st.settings.lock().unwrap() = json!({ "multi": { "enabled": false } });
         let s = serde_json::to_value(roblox_status_now(&st)).unwrap();
         assert_eq!(s["multiActive"], json!(false));
+    }
+
+    /// Multi-instance off with a live guard: an unreadable process list keeps the guard
+    /// (releasing it would close every client); only "none run" lets it go.
+    #[test]
+    fn unknown_process_list_keeps_the_mutex() {
+        use crate::platform::{Capabilities, Null, Platform, RobloxInstall};
+        struct Unknown;
+        impl Platform for Unknown {
+            fn capabilities(&self) -> Capabilities {
+                Null.capabilities()
+            }
+            fn roblox_install(&self) -> Option<RobloxInstall> {
+                None
+            }
+            fn open_uri(&self, uri: &str) -> std::io::Result<()> {
+                Null.open_uri(uri)
+            }
+            fn roblox_running(&self) -> Option<bool> {
+                None
+            }
+        }
+        struct Live;
+        impl crate::platform::Held for Live {}
+        let d = tempfile::tempdir().unwrap();
+        let rc =
+            crate::roblox::RobloxClient::new(crate::roblox::BaseUrls::all("http://127.0.0.1:9"));
+        let mut st = crate::test_state(d.path(), rc);
+        let off = json!({ "multi": { "enabled": false } });
+        *st.multi_guard.lock().unwrap() = Some(Box::new(Live));
+        assert!(!want_multi(&st, &off), "Null: nothing runs, let go");
+        st.platform = Box::new(Unknown);
+        assert!(want_multi(&st, &off), "unknown: keep it");
     }
 
     #[test]
@@ -2049,20 +2214,33 @@ mod tests {
         let t = setup(Some("oldpass1"));
         let c = t.c();
         assert_eq!(
-            change_password_impl(&c, Some("oldpass1"), Some("newpass1")).unwrap_err(),
+            change_password_impl(&c, c.gen_now(), Some("oldpass1"), Some("newpass1")).unwrap_err(),
             LOCKED
         );
         unlock(&t, Some("oldpass1"), true).unwrap();
         for cur in [None, Some("wrongpw1")] {
             assert_eq!(
-                change_password_impl(&c, cur, Some("newpass1")).unwrap_err(),
+                change_password_impl(&c, c.gen_now(), cur, Some("newpass1")).unwrap_err(),
                 "WRONG_PASSWORD"
             );
         }
-        assert!(change_password_impl(&c, Some("oldpass1"), Some("short")).is_err());
-        change_password_impl(&c, Some("oldpass1"), Some("newpass1")).unwrap();
+        assert!(change_password_impl(&c, c.gen_now(), Some("oldpass1"), Some("short")).is_err());
+        change_password_impl(&c, c.gen_now(), Some("oldpass1"), Some("newpass1")).unwrap();
         assert!(!t.cache().exists());
         assert!(Vault::open(&t.path(), Some("newpass1"), os()).is_ok());
+    }
+
+    #[test]
+    fn lock_during_change_password_wins() {
+        let t = setup(Some("oldpass1"));
+        unlock(&t, Some("oldpass1"), true).unwrap();
+        let start = t.c().gen_now();
+        t.lock(); // locked (then reopened) while the prompt or Argon2 ran
+        unlock(&t, None, false).unwrap();
+        let r = change_password_impl(&t.c(), start, Some("oldpass1"), Some("newpass1"));
+        assert_eq!(r.unwrap_err(), WAS_LOCKED);
+        assert!(t.cache().exists(), "remember cache kept");
+        assert!(Vault::open(&t.path(), Some("oldpass1"), os()).is_ok());
     }
 
     #[test]
@@ -2071,7 +2249,7 @@ mod tests {
         unlock(&t, Some("oldpass1"), false).unwrap();
         let k = keys(&t.slot).unwrap();
         let h = k.rewrap(Some("first111")).unwrap();
-        change_password_impl(&t.c(), Some("oldpass1"), Some("second11")).unwrap();
+        change_password_impl(&t.c(), t.c().gen_now(), Some("oldpass1"), Some("second11")).unwrap();
         let e = with_vault(&t.slot, |v| v.apply_rewrap(&k, h).map_err(verr)).unwrap_err();
         assert_eq!(e, "The vault changed, try again.");
         assert!(Vault::open(&t.path(), Some("second11"), os()).is_ok());
@@ -2187,7 +2365,7 @@ mod tests {
             })
             .unwrap()
             .clone();
-        change_password_impl(&t.c(), Some("oldpass1"), Some("newpass1")).unwrap();
+        change_password_impl(&t.c(), t.c().gen_now(), Some("oldpass1"), Some("newpass1")).unwrap();
         restore_impl(&t.c(), &one, None, || Ok(os())).unwrap();
         assert!(t.unlocked(), "restore keeps the vault open");
         assert_eq!(marker(&t), json!("one"));

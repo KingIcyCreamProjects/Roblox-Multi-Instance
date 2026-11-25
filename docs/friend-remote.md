@@ -14,7 +14,7 @@ Open Settings, Friend remote. Until a link exists, RMI shows three steps. Each s
    - macOS: click the Tailscale icon in the menu bar, choose Log in, and sign in.
    - Linux: run `sudo tailscale up` in a terminal and open the link it prints.
    - Still waiting? Open Tailscale and check that it says Connected.
-3. **Turn on friend link.** Click "Turn on friend link". RMI runs Tailscale for you and saves the address it gets. If it fails, RMI shows Tailscale's message. Click the button again, or use "I have my own address".
+3. **Turn on friend link.** Click "Turn on friend link". RMI runs Tailscale for you and saves the address it gets. If it fails, RMI shows a short plain message (Tailscale's own output goes to RMI's log). Click the button again, or use "I have my own address".
 
 If Tailscale needs your OK to share a link (Funnel or HTTPS is switched off for your account), RMI shows "Allow Funnel for your Tailscale account". Click "Open Tailscale page", approve it there, then come back and click "Try again". RMI opens the link Tailscale gives it. You only do this once per account.
 
@@ -88,9 +88,9 @@ To remove an account your friend added, remove it in Accounts like any other. To
 
 Switch off "Let a friend control accounts" in Settings, Friend remote. RMI stops its server and removes the Tailscale Funnel entry it made. The old link stops working. RMI also removes that entry when you change the friend port or clear the public address, so nothing else that later uses the old port is put on the internet.
 
-To stop sharing for good, press "Turn off friend link" in Settings, Friend remote (shown when the address is one RMI made with Tailscale). RMI removes its Funnel entry, clears the address and turns the friend remote off, and you are back at the setup steps.
+To stop sharing for good, press "Turn off friend link" in Settings, Friend remote (shown when the address is one RMI made with Tailscale). RMI removes its Funnel entry, clears the address and turns the friend remote off, and you are back at the setup steps. This button needs Tailscale running: if RMI cannot read or change the Funnel settings, it shows the error and changes nothing (the address stays, so you can see the link may still be live).
 
-RMI only removes an entry whose single handler (`/`) points at the friend server's own port. Entries you made yourself are never touched. If Tailscale is not running when you turn it off, RMI notes it in its log and the entry stays; run `tailscale funnel status` to check and `tailscale funnel --https=<port> off` to remove it.
+RMI only removes an entry whose single handler (`/`) points at the friend server's own port. Entries you made yourself are never touched. If Tailscale is not running when you switch the friend remote off, RMI notes it in its log and the entry stays; run `tailscale funnel status` to check and `tailscale funnel --https=<port> off` to remove it.
 ## Troubleshooting
 
 **The link does not open.** Check that RMI is running and the friend link is on. The PC must be awake and online. Tailscale must be running on your PC. A new Funnel address can take a minute to start working.
@@ -103,7 +103,7 @@ RMI only removes an entry whose single handler (`/`) points at the friend server
 
 **Port 443 is already used.** If another Tailscale Serve or Funnel entry uses 443, RMI picks 8443, then 10000, and the link ends in `:8443` or `:10000`. Give your friend the link exactly as shown. If all three ports are used, RMI says so and you need to free one in Tailscale.
 
-**Tailscale not found.** RMI looks on your PATH, then in the default install folder (`C:\Program Files\Tailscale` on Windows, `/Applications/Tailscale.app` on macOS). Reinstall Tailscale in the default place.
+**Tailscale not found.** RMI looks in the default install folder first (`C:\Program Files\Tailscale` on Windows, `/Applications/Tailscale.app` on macOS), then on your PATH (absolute entries only). Linux has no default folder, so there only PATH counts. Reinstall Tailscale in the default place.
 
 ## Security notes
 

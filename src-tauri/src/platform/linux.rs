@@ -69,24 +69,27 @@ fn tracker_of(s: &str) -> Option<&str> {
 }
 
 /// Our processes started with a launch URI: `(pid, tracker id)`. One client is several
-/// processes (pasta, flatpak, bwrap, Sober); all carry the URI.
+/// processes (pasta, flatpak, bwrap, Sober); all carry the URI. Empty when `/proc` could not
+/// be read: callers that act on "none run" use `snapshot`.
 fn players() -> Vec<(u32, String)> {
-    let me = std::fs::metadata("/proc/self").map(|m| m.uid()).ok();
-    let Ok(dir) = std::fs::read_dir("/proc") else {
-        return vec![];
-    };
-    dir.flatten()
-        .filter_map(|e| {
-            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-            if e.metadata().ok().map(|m| m.uid()) != me {
-                return None;
-            }
-            let cmd = std::fs::read(e.path().join("cmdline")).ok()?;
-            let cmd = String::from_utf8_lossy(&cmd);
-            cmd.contains("roblox-player:")
-                .then(|| (pid, tracker_of(&cmd).unwrap_or("").to_owned()))
-        })
-        .collect()
+    snapshot().unwrap_or_default()
+}
+
+/// `players`, `None` when `/proc` could not be read.
+fn snapshot() -> Option<Vec<(u32, String)>> {
+    let me = std::fs::metadata("/proc/self").map(|m| m.uid()).ok()?;
+    let dir = std::fs::read_dir("/proc").ok()?;
+    let all = dir.flatten().filter_map(|e| {
+        let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+        if e.metadata().ok().map(|m| m.uid()) != Some(me) {
+            return None;
+        }
+        let cmd = std::fs::read(e.path().join("cmdline")).ok()?;
+        let cmd = String::from_utf8_lossy(&cmd);
+        cmd.contains("roblox-player:")
+            .then(|| (pid, tracker_of(&cmd).unwrap_or("").to_owned()))
+    });
+    Some(all.collect())
 }
 
 /// One pid per client: the lowest of its processes.
@@ -272,8 +275,8 @@ impl Platform for Linux {
         }
     }
 
-    fn roblox_running(&self) -> bool {
-        !players().is_empty()
+    fn roblox_running(&self) -> Option<bool> {
+        snapshot().map(|p| !p.is_empty())
     }
 
     /// Nothing to hold: each client has its own network namespace.
@@ -286,6 +289,8 @@ impl Platform for Linux {
     }
 
     fn close_tracked(&self, tracker_id: &str) -> Result<usize> {
+        // Unknown is not "nothing to close": a caller must not report the client closed.
+        snapshot().ok_or_else(|| std::io::Error::other(super::UNREADABLE))?;
         Ok(stop(tracker_id))
     }
 
@@ -294,18 +299,14 @@ impl Platform for Linux {
         Ok(mine && stop(tracker_id) > 0)
     }
 
-    fn tracked_pids(&self, tracker_id: &str) -> Vec<u32> {
-        clients(&players(), Some(tracker_id))
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect()
+    fn tracked_pids(&self, tracker_id: &str) -> Option<Vec<u32>> {
+        let all = clients(&snapshot()?, Some(tracker_id)).into_iter();
+        Some(all.map(|(p, _)| p).collect())
     }
 
-    fn tracked_clients(&self, trackers: &[String]) -> Vec<(u32, String)> {
-        clients(&players(), None)
-            .into_iter()
-            .filter(|(_, t)| trackers.contains(t))
-            .collect()
+    fn tracked_clients(&self, trackers: &[String]) -> Option<Vec<(u32, String)>> {
+        let all = clients(&snapshot()?, None).into_iter();
+        Some(all.filter(|(_, t)| trackers.contains(t)).collect())
     }
 }
 

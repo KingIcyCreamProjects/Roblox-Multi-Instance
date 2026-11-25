@@ -24,7 +24,8 @@ export function Avatar({
   className?: string;
 }) {
   const src = fileSrc(a.headshot);
-  const [broken, setBroken] = useState(false);
+  // the src that failed: a new headshot gets a fresh try
+  const [broken, setBroken] = useState<string | null>(null);
   return (
     <span
       data-pii
@@ -42,14 +43,14 @@ export function Avatar({
         fontSize: `${(size * 0.36) / 16}rem`,
       }}
     >
-      {src && !broken ? (
+      {src && broken !== src ? (
         <img
           src={src}
           alt=""
           loading="lazy"
           decoding="async"
           draggable={false}
-          onError={() => setBroken(true)}
+          onError={() => setBroken(src)}
           className="size-full object-cover"
         />
       ) : (
@@ -59,10 +60,10 @@ export function Avatar({
   );
 }
 
-const dot: Record<PresenceState, string | null> = {
+/** presence dot colour, shared by rows and the Inspector */
+export const presenceDot: Record<PresenceState, string> = {
   online: "bg-online",
-  in_game: "bg-online",
-
+  in_game: "bg-ingame",
   in_studio: "bg-studio",
   offline: "bg-text-3",
 };
@@ -135,6 +136,8 @@ export const AccountRow = memo(function AccountRow({
   const game = state === "in_game" ? a.presence?.gameName : null;
   // a row menu is open: no "Last played" tooltip on top of it
   const [menu, setMenu] = useState(false);
+  // always controlled: switching `open` between undefined and false makes Radix warn
+  const [tip, setTip] = useState(false);
   // running on a paired computer: presence still says "In game", so say where too
   const where = useElsewhere().get(a.userId ?? NaN);
   const moving = useMoving((m) => m.ids.includes(a.id));
@@ -148,7 +151,7 @@ export const AccountRow = memo(function AccountRow({
         transition: s.transition,
       }}
     >
-      <Tooltip.Root delayDuration={700} open={menu ? false : undefined}>
+      <Tooltip.Root delayDuration={700} open={!menu && tip} onOpenChange={setTip}>
         <RowMenu a={a} ids={menuIds} onOpenChange={setMenu}>
           <Tooltip.Trigger asChild>
             <div
@@ -185,12 +188,12 @@ export const AccountRow = memo(function AccountRow({
                     aria-hidden
                     className={clsx(
                       "absolute -right-px -bottom-px size-2 rounded-full shadow-[0_0_0_2px_var(--glass)]",
-                      dot[state],
+                      presenceDot[state],
                     )}
                   />
                 </span>
                 <span className="flex min-w-0 flex-1 items-baseline gap-3">
-                  <span data-pii className="truncate text-[0.84375rem] font-semibold text-text-1">
+                  <span data-pii className="truncate text-14 font-semibold text-text-1">
                     {label(a)}
                   </span>
                   {a.pinned && (
@@ -223,7 +226,7 @@ export const AccountRow = memo(function AccountRow({
                 )}
                 <SessionBadge a={a} />
                 {dest && (
-                  <span className="min-w-0 truncate text-[0.71875rem] text-text-3 @max-[30rem]:hidden">
+                  <span className="min-w-0 truncate text-12 text-text-3 @max-[30rem]:hidden">
                     <DestLabel d={dest} />
                   </span>
                 )}

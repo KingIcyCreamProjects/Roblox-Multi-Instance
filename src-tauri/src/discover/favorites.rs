@@ -32,7 +32,11 @@ fn push(v: &mut Vec<Favorite>, new: Favorite) -> (Favorite, bool) {
     {
         return (d.clone(), false);
     }
-    let order = v.iter().map(|f| f.order + 1).max().unwrap_or(0);
+    let order = v
+        .iter()
+        .map(|f| f.order.saturating_add(1))
+        .max()
+        .unwrap_or(0);
     let f = Favorite { order, ..new };
     v.push(f.clone());
     (f, true)

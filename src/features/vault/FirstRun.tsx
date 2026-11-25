@@ -80,7 +80,7 @@ export function FirstRun() {
             <label
               key={o.mode}
               className={clsx(
-                "flex cursor-pointer items-center gap-3 rounded-[10px] px-3.5 py-2.5 transition-colors duration-[var(--dur-quick)]",
+                "flex cursor-pointer items-center gap-3 rounded-control px-3.5 py-2.5 transition-colors duration-[var(--dur-quick)]",
                 "has-[:focus-visible]:shadow-[var(--focus-ring)]",
                 mode === o.mode
                   ? "bg-surface-3 shadow-[inset_0_0_0_1px_var(--hairline-strong)]"

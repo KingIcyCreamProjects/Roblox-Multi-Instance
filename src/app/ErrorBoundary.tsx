@@ -1,6 +1,9 @@
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { Lock } from "lucide-react";
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Button } from "@/components/ui/Button";
+import { call } from "@/lib/ipc";
 import { queryClient } from "@/lib/queryClient";
 import { logError } from "@/lib/report";
 import { t } from "@/lib/i18n";
@@ -33,13 +36,20 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
             >
               <h1 className="text-16 font-semibold text-text-1">{t("error.title")}</h1>
               <p className="max-w-[480px] text-center text-13 text-text-2">{error.message}</p>
-              <button
-                type="button"
-                className="rounded-control bg-surface-3 px-3 py-1.5 text-13 text-text-1 hover:bg-surface-4"
-                onClick={() => window.location.reload()}
-              >
-                {t("error.reload")}
-              </button>
+              <div className="flex gap-2">
+                <Button onClick={() => window.location.reload()}>{t("error.reload")}</Button>
+                {/* App (Ctrl+L, the title-bar Lock) is gone: never leave the vault open with no way to lock */}
+                <Button
+                  onClick={() =>
+                    void call("vault_lock")
+                      .catch((e: unknown) => logError(`vault_lock failed: ${String(e)}`))
+                      .finally(() => window.location.reload())
+                  }
+                >
+                  <Lock size={14} strokeWidth={1.75} aria-hidden />
+                  {t("title.lock")}
+                </Button>
+              </div>
             </div>
           </div>
         </Tooltip.Provider>

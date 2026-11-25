@@ -5,7 +5,7 @@ import { toast } from "@/components/Toasts";
 import { Button } from "@/components/ui/Button";
 import { call, pickOpenPath, pickSavePath } from "@/lib/ipc";
 import { reportError } from "@/lib/report";
-import { t, type MsgKey } from "@/lib/i18n";
+import { LOCALE, t, type MsgKey } from "@/lib/i18n";
 import { PasswordField } from "@/features/vault/PasswordField";
 import { inputCls, listRowCls, SubHeading } from "./controls";
 import { useVaultStatus, vaultError } from "@/features/vault/useVault";
@@ -159,7 +159,7 @@ function PasswordForm({
 function ago(iso: string) {
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
   // past a week a date reads better than "311 days ago"
-  if (s >= 7 * 86400) return new Date(iso).toLocaleDateString();
+  if (s >= 7 * 86400) return new Date(iso).toLocaleDateString(LOCALE);
   const day = Math.floor(s / 86400);
   if (day >= 1) return day === 1 ? t("vs.ago.day1") : t("vs.ago.day", { n: day });
   const hour = Math.floor(s / 3600);
@@ -261,7 +261,7 @@ function ExportEncrypted({ needPassword }: { needPassword: boolean }) {
     setTouched(true);
     if (a.pending || [...pw].length < 8 || pw !== cf || (needPassword && !cur)) return;
     void a.run(async () => {
-      const path = await pickSavePath("rmi-vault.rmiv", "rmiv", "RMI vault");
+      const path = await pickSavePath("rmi-vault.rmiv", "rmiv", t("vs.rmivFiles"));
       if (!path) return false;
       await call("vault_export_encrypted", {
         path,
@@ -314,15 +314,27 @@ function ExportEncrypted({ needPassword }: { needPassword: boolean }) {
 
 /** Loads an "Export encrypted" file from another computer; the backend backs up first. */
 function ImportEncrypted() {
+  const qc = useQueryClient();
   const [pw, setPw] = useState("");
+  /** it replaces every account: asks first, like Restore */
+  const [asking, setAsking] = useState(false);
   const a = useAction();
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (a.pending || !pw) return;
+    setAsking(true);
+  };
+  const run = () => {
+    setAsking(false);
     void a.run(async () => {
-      const path = await pickOpenPath("rmiv", "RMI vault");
+      const path = await pickOpenPath("rmiv", t("vs.rmivFiles"));
       if (!path) return false;
-      await call("vault_import_file", { path, password: pw });
+      try {
+        await call("vault_import_file", { path, password: pw });
+      } finally {
+        // the backup Rust made before the import shows in Backups
+        void qc.invalidateQueries({ queryKey: ["vault"] });
+      }
       setPw("");
     }, "vs.imported");
   };
@@ -337,9 +349,23 @@ function ImportEncrypted() {
           onChange={(e) => setPw(e.target.value)}
         />
         <Msg err={a.err} ok={a.ok} />
-        <Button type="submit" disabled={!pw || a.pending} className="self-start">
-          {a.pending ? t("vs.working") : t("vs.importBtn")}
-        </Button>
+        {asking ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="status" className="text-13 text-text-2">
+              {t("vs.import.ask")}
+            </p>
+            <Button sm variant="danger" disabled={!pw} onClick={run}>
+              {t("vs.importBtn")}
+            </Button>
+            <Button autoFocus sm variant="ghost" onClick={() => setAsking(false)}>
+              {t("vs.restore.no")}
+            </Button>
+          </div>
+        ) : (
+          <Button type="submit" disabled={!pw || a.pending} className="self-start">
+            {a.pending ? t("vs.working") : t("vs.importBtn")}
+          </Button>
+        )}
       </Block>
     </form>
   );
@@ -354,7 +380,7 @@ function ExportPlain({ needPassword }: { needPassword: boolean }) {
     e.preventDefault();
     if (!ready || a.pending) return;
     void a.run(async () => {
-      const path = await pickSavePath("rmi-vault-plain.json", "json", "JSON");
+      const path = await pickSavePath("rmi-vault-plain.json", "json", t("settings.jsonFiles"));
       if (!path) return false;
       await call("vault_export_plain", {
         path,

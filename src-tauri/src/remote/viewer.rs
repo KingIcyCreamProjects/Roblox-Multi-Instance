@@ -133,7 +133,7 @@ fn decode_keys(path: &std::path::Path, plain: Result<zeroize::Zeroizing<Vec<u8>>
             keys
         }
         Err(e) => {
-            let bad = path.with_extension("bin.bad");
+            let bad = path.with_extension(format!("bin.bad-{}", super::unix_secs()));
             match std::fs::rename(path, &bad) {
                 Ok(()) => {
                     log::error!("remote: {KEYS_FILE} unreadable ({e}); kept as .bad, pair again")
@@ -157,22 +157,57 @@ fn cached_keys(st: &AppState) -> Keys {
     let Ok(at) = std::fs::metadata(keys_path(st)).and_then(|m| m.modified()) else {
         return Keys::new(); // no file: paired with nobody
     };
-    let mut c = CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, keys)) = c.as_ref().filter(|(t, _)| *t == at) {
+    let cache = || {
+        CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some((_, keys)) = cache().as_ref().filter(|(t, _)| *t == at) {
         return keys.clone();
     }
+    // off the cache lock: the OS secret store can stall
     let keys = load_keys(st).unwrap_or_default();
-    *c = Some((at, keys.clone()));
+    *cache() = Some((at, keys.clone()));
     keys
+}
+
+/// Held around every load-change-save of the keys file (two at once would drop one's change).
+fn keys_lock() -> std::sync::MutexGuard<'static, ()> {
+    static KEYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    KEYS.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What this computer last started for each host's queued send (by its IP): when, the send's
+/// op id, the ids. Repeated in every report to it for `HANDOVER_WAIT`: one lost report must
+/// not leave the send waiting there while the accounts run in both places.
+static LAUNCHED: std::sync::Mutex<Launched> = std::sync::Mutex::new(BTreeMap::new());
+
+type Launched = BTreeMap<String, (std::time::Instant, Value, Vec<u64>)>;
+
+fn launched() -> std::sync::MutexGuard<'static, Launched> {
+    LAUNCHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Adds the last `launched` answer for `ip` (still within the wait) to a report body.
+fn add_launched(b: &mut Value, ip: &str) {
+    let mut l = launched();
+    l.retain(|_, e| e.0.elapsed() < super::HANDOVER_WAIT);
+    if let Some((_, op, ids)) = l.get(ip) {
+        b["launched"] = json!(ids);
+        b["launchedOp"] = op.clone(); // which send this answers
+    }
 }
 
 /// The report body: this computer's name and the user ids with a client here. `None` while
 /// locked. Blocking.
-fn report_body(st: &AppState) -> Option<Value> {
+pub(super) fn report_body(st: &AppState) -> Option<Value> {
     let ids = super::handover::running_ids(st)?;
-    Some(json!({ "name": st.remote.device_name(), "userIds": ids, "canHandOver": true }))
+    let name = st.remote.device_name();
+    let can = super::handover::can_launch(st);
+    Some(json!({ "name": name, "userIds": ids, "canHandOver": true, "canLaunch": can }))
 }
 
 /// One report to `ip`: its answer (`{}` from an older RMI), `None` on any failure.
@@ -195,12 +230,16 @@ fn note_answer(app: &tauri::AppHandle, ip: &str, k: &Key, v: &Value) {
     let name = Some(clean_name(v["name"].as_str().unwrap_or_default()))
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| k.name.clone());
-    app.state::<AppState>().remote.note_host(ip, &name, ids);
+    let launch = v["canLaunch"] == true;
+    app.state::<AppState>()
+        .remote
+        .note_host(ip, &name, ids, launch);
 }
 
 /// Tell every computer this one is paired with which Roblox accounts (user ids) have a client
 /// here, so that computer's friend page can name this one; its answer says the same of it and
-/// may ask this one to let accounts go (Run here there). Sent only to computers the owner
+/// may ask this one to let accounts go (Run here there) or launch them (Run on there). Sent
+/// only to computers the owner
 /// paired this one with; a locked vault sends nothing.
 /// ponytail: one small POST per paired computer every `PUSH_EVERY`, changed or not; send on
 /// change only if that ever shows up as load.
@@ -223,23 +262,50 @@ pub async fn push_running(app: &tauri::AppHandle) {
     // All at once: computers that are off must not delay the report to the ones that are on.
     // An older RMI (404), a computer that is off or no longer paired: try again next time.
     let sends = keys.iter().map(|(ip, k)| {
-        let (c, body) = (&c, &body);
+        let c = &c;
+        let mut body = body.clone();
+        add_launched(&mut body, ip);
         async move {
-            let v = report(c, ip, port, k, body).await?;
-            note_answer(app, ip, k, &v);
-            let mut want: Vec<u64> = serde_json::from_value(v["handover"].clone()).ok()?;
-            want.truncate(super::MAX_RUNNING);
-            if want.is_empty() {
-                return Some(());
+            let mut v = report(c, ip, port, k, &body).await?;
+            // An ask can ride any answer, a follow-up's too (the host asks once): acted on,
+            // a few rounds at most.
+            for _ in 0..3 {
+                note_answer(app, ip, k, &v);
+                let asked = |f: &str| {
+                    let mut ids: Vec<u64> =
+                        serde_json::from_value(v[f].clone()).unwrap_or_default();
+                    ids.truncate(super::MAX_RUNNING);
+                    ids
+                };
+                let (want, go, op) = (asked("handover"), asked("launch"), v["launchOp"].clone());
+                if want.is_empty() && go.is_empty() {
+                    return Some(());
+                }
+                // Released / launched here, then one more report right away so that computer
+                // sees them gone, and which started (`launched`, empty when none: it stops
+                // waiting).
+                let (h, from) = (app.clone(), ip.clone());
+                let body = tauri::async_runtime::spawn_blocking(move || {
+                    let st = h.state::<AppState>();
+                    if !want.is_empty() {
+                        super::handover::release(st.inner(), &want);
+                    }
+                    if !go.is_empty() {
+                        let s =
+                            super::handover::launch_saved(&h, &go, super::handover::LAUNCH_WAIT)
+                                .unwrap_or_default();
+                        // runs here now: not offered as running there until its next answer
+                        st.remote.c.forget(&from, &s);
+                        launched().insert(from.clone(), (std::time::Instant::now(), op, s));
+                    }
+                    let mut b = report_body(st.inner())?;
+                    add_launched(&mut b, &from);
+                    Some(b)
+                })
+                .await
+                .ok()??;
+                v = report(c, ip, port, k, &body).await?;
             }
-            // Released here, then one more report right away so that computer sees them gone.
-            let body = blocking(app, move |st| {
-                super::handover::release(st, &want);
-                Ok(report_body(st))
-            })
-            .await
-            .ok()??;
-            let v = report(c, ip, port, k, &body).await?;
             note_answer(app, ip, k, &v);
             Some(())
         }
@@ -254,6 +320,28 @@ pub(super) async fn hand_over(
     name: String,
     ids: Vec<u64>,
 ) -> Result<Vec<u64>, String> {
+    ask(app, "handover", "released", ip, name, ids).await
+}
+
+/// Run on, direct: asks `ip` (this one holds its token) to launch `ids`; the ids it started.
+pub(super) async fn launch_on(
+    app: &tauri::AppHandle,
+    ip: String,
+    name: String,
+    ids: Vec<u64>,
+) -> Result<Vec<u64>, String> {
+    ask(app, "launch", "started", ip, name, ids).await
+}
+
+/// `POST /v1/remote/{route}` with `ids` to `ip`; the ids in the answer's `field`.
+async fn ask(
+    app: &tauri::AppHandle,
+    route: &str,
+    field: &str,
+    ip: String,
+    name: String,
+    ids: Vec<u64>,
+) -> Result<Vec<u64>, String> {
     let unreachable = || format!("Could not reach {name}.");
     let k = ip.clone();
     let key = blocking(app, move |st| Ok(cached_keys(st).remove(&k)))
@@ -263,7 +351,7 @@ pub(super) async fn hand_over(
         .ok_or_else(unreachable)?;
     let port = app.state::<AppState>().remote.port();
     let r = client()?
-        .post(format!("http://{ip}:{port}/v1/remote/handover"))
+        .post(format!("http://{ip}:{port}/v1/remote/{route}"))
         .timeout(super::HANDOVER_WAIT) // closing clients takes a few seconds
         .bearer_auth(&key.token)
         .json(&json!({ "userIds": ids }))
@@ -273,7 +361,7 @@ pub(super) async fn hand_over(
     match r.status().as_u16() {
         200 => {
             let v: Value = r.json().await.map_err(|_| unreachable())?;
-            serde_json::from_value(v["released"].clone()).map_err(|_| unreachable())
+            serde_json::from_value(v[field].clone()).map_err(|_| unreachable())
         }
         404 => Err(format!("Update RMI on {name} first.")),
         409 => Err(format!("RMI is locked on {name}.")),
@@ -420,11 +508,15 @@ pub async fn remote_pair(
     let ok = r.status().is_success();
     let v: Value = r.json().await.unwrap_or_default();
     if !ok {
-        let msg = v
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .unwrap_or("Pairing failed. Try again.");
-        return Err(msg.chars().take(200).collect());
+        // RMI's codes in RMI's words: text from a node not yet trusted is never shown
+        let msg = match v.pointer("/error/code").and_then(Value::as_str) {
+            Some("no_code") => "Show a pairing code on that computer first.",
+            Some("bad_code") => "Wrong code. Check it and try again.",
+            Some("off") => "Remote access is switched off on that computer.",
+            Some("save_failed") => "That computer could not save the pairing. Try again.",
+            _ => "Pairing failed. Try again.",
+        };
+        return Err(msg.into());
     }
     let token = v["token"]
         .as_str()
@@ -437,6 +529,7 @@ pub async fn remote_pair(
         .unwrap_or_else(|| ip.to_string());
     let (k, n) = (ip.to_string(), name.clone());
     blocking(&app, move |st| {
+        let _g = keys_lock();
         let mut keys = load_keys(st)?;
         keys.insert(k, Key { token, name: n });
         save_keys(st, &keys)
@@ -454,34 +547,44 @@ async fn relay(to: std::net::SocketAddrV4) -> Result<u16, String> {
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     static RELAYS: Mutex<Option<HashMap<std::net::SocketAddrV4, u16>>> = Mutex::new(None);
-    if let Some(p) = RELAYS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .get(&to)
-    {
+    let relays = || {
+        RELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some(p) = relays().get_or_insert_with(HashMap::new).get(&to) {
         return Ok(*p);
     }
     let l = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| e.to_string())?;
     let port = l.local_addr().map_err(|e| e.to_string())?.port();
-    RELAYS
-        .lock()
-        .unwrap()
+    // two calls at once: the first one's relay is kept, this listener is dropped
+    let kept = *relays()
         .get_or_insert_with(HashMap::new)
-        .insert(to, port);
+        .entry(to)
+        .or_insert(port);
+    if kept != port {
+        return Ok(kept);
+    }
     tokio::spawn(async move {
         while let Ok((mut a, _)) = l.accept().await {
             tokio::spawn(async move {
-                // the HTTP upgrade request; the viewer sends nothing more before the 101
+                // the HTTP upgrade request; the viewer sends nothing more before the 101. A
+                // client that stalls before its end is dropped.
                 let mut head = Vec::new();
                 let mut b = [0u8; 4096];
-                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match a.read(&mut b).await {
-                        Ok(n @ 1..) if head.len() < 16384 => head.extend_from_slice(&b[..n]),
-                        _ => return,
+                let read = async {
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match a.read(&mut b).await {
+                            Ok(n @ 1..) if head.len() < 16384 => head.extend_from_slice(&b[..n]),
+                            _ => return false,
+                        }
                     }
+                    true
+                };
+                if !matches!(tokio::time::timeout(PROBE * 4, read).await, Ok(true)) {
+                    return;
                 }
                 let head = String::from_utf8_lossy(&head);
                 // only the viewer's own upgrade: other loopback clients (a browser page) are
@@ -551,7 +654,10 @@ pub async fn remote_connect(app: tauri::AppHandle, ip: String) -> Result<Connect
 #[tauri::command]
 pub async fn remote_forget(app: tauri::AppHandle, ip: String) -> Result<(), String> {
     let ip = peer_ip(&ip)?.to_string();
+    // its answers go too: Run here / Run on stop offering it at once
+    app.state::<AppState>().remote.forget_host(&ip);
     blocking(&app, move |st| {
+        let _g = keys_lock();
         let mut keys = load_keys(st)?;
         if keys.remove(&ip).is_some() {
             save_keys(st, &keys)?;
@@ -631,10 +737,16 @@ mod tests {
             std::fs::write(&path, b"blob").unwrap();
             assert!(decode_keys(&path, bad).is_empty());
             assert!(!path.exists(), "moved away");
-            assert_eq!(
-                std::fs::read(path.with_extension("bin.bad")).unwrap(),
-                b"blob"
-            );
+            let kept = std::fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .find(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("remote-keys.bin.bad-")
+                })
+                .unwrap();
+            assert_eq!(std::fs::read(kept.path()).unwrap(), b"blob");
         }
     }
 

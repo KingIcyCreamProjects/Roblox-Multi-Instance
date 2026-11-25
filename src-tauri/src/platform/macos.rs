@@ -28,11 +28,19 @@ fn launch_args(uri: &str) -> [&str; 2] {
 }
 
 /// Roblox players with their command line (arguments joined by spaces) and start time (s).
+/// Empty when the process list could not be read: callers that act on "none run" use
+/// `snapshot`.
 fn players() -> Vec<(u32, Zeroizing<String>, i64)> {
+    snapshot().unwrap_or_default()
+}
+
+/// `players`, `None` when the process list could not be read (it does not list RMI itself).
+fn snapshot() -> Option<Vec<(u32, Zeroizing<String>, i64)>> {
     let mut s = System::new();
     // Names first (cheap), arguments only for Roblox players: an argv read per process
     // costs a sysctl each.
     s.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    s.process(Pid::from_u32(std::process::id()))?;
     let pids: Vec<Pid> = s
         .processes()
         .values()
@@ -40,25 +48,23 @@ fn players() -> Vec<(u32, Zeroizing<String>, i64)> {
         .map(|p| p.pid())
         .collect();
     if pids.is_empty() {
-        return vec![];
+        return Some(vec![]);
     }
     s.refresh_processes_specifics(
         ProcessesToUpdate::Some(&pids),
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
-    pids.iter()
-        .filter_map(|pid| s.process(*pid))
-        .map(|p| {
-            let cmd = p
-                .cmd()
-                .iter()
-                .map(|a| a.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ");
-            (p.pid().as_u32(), Zeroizing::new(cmd), p.start_time() as i64)
-        })
-        .collect()
+    let all = pids.iter().filter_map(|pid| s.process(*pid)).map(|p| {
+        let cmd = p
+            .cmd()
+            .iter()
+            .map(|a| a.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (p.pid().as_u32(), Zeroizing::new(cmd), p.start_time() as i64)
+    });
+    Some(all.collect())
 }
 
 pub fn cmdline(pid: u32) -> Option<Zeroizing<String>> {
@@ -76,8 +82,9 @@ pub fn has_tracker(cmd: &str, t: &str) -> bool {
     crate::watcher::tracker_from_cmdline(cmd).as_deref() == Some(t)
 }
 
+/// An unreadable process list counts as alive: never "closed" on a failed read.
 fn alive(pid: u32, started: i64) -> bool {
-    players().iter().any(|p| p.0 == pid && p.2 == started)
+    snapshot().is_none_or(|all| all.iter().any(|p| p.0 == pid && p.2 == started))
 }
 
 /// Close `pid` if it is still the same Roblox player (`started` s, `tracker`): SIGTERM,
@@ -87,7 +94,8 @@ pub fn close_verified(
     started: Option<i64>,
     tracker: Option<&str>,
 ) -> Result<bool, String> {
-    let Some((_, cmd, st)) = players().into_iter().find(|p| p.0 == pid) else {
+    let all = snapshot().ok_or("Could not read the process list.")?;
+    let Some((_, cmd, st)) = all.into_iter().find(|p| p.0 == pid) else {
         return Ok(true);
     };
     if started.is_some_and(|s| (s - st).abs() > 2) || tracker.is_some_and(|t| !has_tracker(&cmd, t))
@@ -110,11 +118,13 @@ pub fn close_verified(
 }
 
 fn tracked(t: &str) -> Vec<u32> {
-    players()
-        .into_iter()
-        .filter(|p| has_tracker(&p.1, t))
-        .map(|p| p.0)
-        .collect()
+    tracked_known(t).unwrap_or_default()
+}
+
+/// `tracked`, `None` when the process list could not be read.
+fn tracked_known(t: &str) -> Option<Vec<u32>> {
+    let all = snapshot()?.into_iter();
+    Some(all.filter(|p| has_tracker(&p.1, t)).map(|p| p.0).collect())
 }
 
 struct NoLock;
@@ -167,8 +177,8 @@ impl Platform for MacOs {
             })
     }
 
-    fn roblox_running(&self) -> bool {
-        !players().is_empty()
+    fn roblox_running(&self) -> Option<bool> {
+        snapshot().map(|p| !p.is_empty())
     }
 
     /// macOS has no singleton lock to hold: each direct run is its own client.
@@ -177,7 +187,9 @@ impl Platform for MacOs {
     }
 
     fn close_tracked(&self, tracker_id: &str) -> std::io::Result<usize> {
-        let n = tracked(tracker_id)
+        // Unknown is not "nothing to close": a caller must not report the client closed.
+        let n = tracked_known(tracker_id)
+            .ok_or_else(|| std::io::Error::other(super::UNREADABLE))?
             .into_iter()
             .filter(|&p| close_verified(p, None, Some(tracker_id)).unwrap_or(false))
             .count();
@@ -227,18 +239,16 @@ impl Platform for MacOs {
         ))
     }
 
-    fn tracked_pids(&self, tracker_id: &str) -> Vec<u32> {
-        tracked(tracker_id)
+    fn tracked_pids(&self, tracker_id: &str) -> Option<Vec<u32>> {
+        tracked_known(tracker_id)
     }
 
-    fn tracked_clients(&self, trackers: &[String]) -> Vec<(u32, String)> {
-        players()
-            .into_iter()
-            .filter_map(|(pid, cmd, _)| {
-                let t = crate::watcher::tracker_from_cmdline(&cmd)?;
-                trackers.contains(&t).then_some((pid, t))
-            })
-            .collect()
+    fn tracked_clients(&self, trackers: &[String]) -> Option<Vec<(u32, String)>> {
+        let all = snapshot()?.into_iter().filter_map(|(pid, cmd, _)| {
+            let t = crate::watcher::tracker_from_cmdline(&cmd)?;
+            trackers.contains(&t).then_some((pid, t))
+        });
+        Some(all.collect())
     }
 
     fn minimize(&self, clients: &[(u32, String)]) -> usize {

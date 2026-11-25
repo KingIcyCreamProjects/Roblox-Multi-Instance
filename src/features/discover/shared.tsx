@@ -55,8 +55,13 @@ export async function copyText(text: string, what: string) {
   }
 }
 
-export const joinLink = (placeId: number, jobId: string) =>
-  `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${jobId}`;
+/** The job id comes from Roblox: encoded, never pasted into the URL as is. */
+export const joinLink = (placeId: number, jobId: string) => {
+  const u = new URL("https://www.roblox.com/games/start");
+  u.searchParams.set("placeId", String(placeId));
+  u.searchParams.set("gameInstanceId", jobId);
+  return u.href;
+};
 
 const compact = new Intl.NumberFormat(LOCALE, { notation: "compact", maximumFractionDigits: 1 });
 export const fmtCount = (n: number) => compact.format(n);
@@ -196,7 +201,7 @@ export function ErrorLine({ message, retry }: { message: string; retry: () => vo
     <div role="alert" className="flex flex-col items-start gap-3 py-10">
       <p className="text-14 text-text-1">{message}</p>
       <Button onClick={retry}>
-        <RefreshCw size={14} strokeWidth={2} />
+        <RefreshCw size={14} strokeWidth={1.75} />
         {t("error.retry")}
       </Button>
     </div>

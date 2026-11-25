@@ -89,7 +89,10 @@ pub fn sync(app: &AppHandle) {
     let clients = if trackers.is_empty() {
         vec![]
     } else {
-        st.platform.tracked_clients(&trackers)
+        match st.platform.tracked_clients(&trackers) {
+            Some(c) => c,
+            None => return, // process list unreadable: keep the last file
+        }
     };
     let accounts = accounts_json(&accts, &clients);
     let key = accounts.to_string();

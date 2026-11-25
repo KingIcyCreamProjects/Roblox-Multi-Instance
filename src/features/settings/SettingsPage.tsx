@@ -139,7 +139,8 @@ function About() {
       </p>
       <div>
         <p className="text-13 text-text-2">{t("settings.about.data")}</p>
-        <p className="font-mono text-13 break-all text-text-1 select-text">
+        {/* the path holds the OS user name */}
+        <p data-pii className="font-mono text-13 break-all text-text-1 select-text">
           {info?.dataDir ?? "…"}
         </p>
       </div>
@@ -214,10 +215,14 @@ const sectionExtras: Partial<Record<SectionId, () => ReactNode>> = {
  * privacy mode is shared with the title-bar eye and Ctrl+Shift+H. */
 const INSTANT = ["client.customSettingsPath", "ui.showUsernames"];
 
-/** Edits that put every catalog item whose default differs from the saved value back to default. */
-function resetEdits(defaults: unknown, saved: unknown) {
+/** Port rows that must all differ (Rust refuses a save that puts two on one port). */
+const PORTS = ["ws.port", "api.port", "friend.port", "remote.port"];
+
+/** Edits that put every item of the `subs` sections (the ones this OS shows) whose default
+ *  differs from the saved value back to default. */
+function resetEdits(defaults: unknown, saved: unknown, subs: SectionId[]) {
   const out: Record<string, unknown> = {};
-  for (const it of SECTIONS.flatMap((x) => x.items)) {
+  for (const it of SECTIONS.filter((x) => subs.includes(x.id)).flatMap((x) => x.items)) {
     if (INSTANT.includes(it.path)) continue;
     const d = get(defaults, it.path);
     if (JSON.stringify(d) !== JSON.stringify(get(saved, it.path))) out[it.path] = d;
@@ -234,7 +239,7 @@ const GROUP_ICON = {
 } as const;
 
 const navItem =
-  "relative flex h-[var(--control-h)] w-full items-center gap-3 rounded-panel px-3 text-left text-14 font-medium transition-colors duration-[var(--dur-quick)]";
+  "relative flex h-[var(--control-h)] w-full items-center gap-3 rounded-panel px-3 text-left text-14 font-medium transition-colors duration-[var(--dur-quick)] focus-visible:shadow-[var(--focus-ring)]";
 
 export function SettingsPage() {
   const [gid, setGid] = useState<(typeof GROUPS)[number]["id"]>("general");
@@ -274,9 +279,12 @@ export function SettingsPage() {
       (e) => setCsErr(errMessage(e)),
     );
   const pickClientSettings = () =>
-    void pickOpenPath("json", t("settings.jsonFiles")).then((p) => {
-      if (typeof p === "string") void setClientSettings(p);
-    });
+    void pickOpenPath("json", t("settings.jsonFiles")).then(
+      (p) => {
+        if (typeof p === "string") void setClientSettings(p);
+      },
+      (e) => setCsErr(errMessage(e)),
+    );
   // Failures reach the banner once, via the shared mutation cache (reportError).
   const set = useSetSettings();
   const { edits, edit, setAll, clear } = useDraft();
@@ -284,7 +292,8 @@ export function SettingsPage() {
   // The draft outlives the page, so unsaved edits are still here on the next visit.
   const n = Object.keys(edits).length;
 
-  // the friend remote sees and closes clients through the watcher's process tracking (none on Linux)
+  // the friend remote sees and closes clients through the watcher's process tracking: hidden
+  // where the watcher capability is off
   // remote access hosting needs screen capture (Windows and macOS only; Linux can still view)
   const shown = (id: SectionId) =>
     id === "remote"
@@ -391,8 +400,16 @@ export function SettingsPage() {
   };
 
   const value = (path: string) => (path in edits ? edits[path] : get(s, path));
-  // an owner login named like the friend's would be two logins on one name: never saved
-  const ownerClash = ownerNameClash(value("friend.ownerUsername"), value("friend.username"));
+  // an owner login named like the friend's would be two logins on one name: never saved.
+  // Only an edit of either name blocks: a clash already stored must not block unrelated saves.
+  const ownerClash =
+    ownerNameClash(value("friend.ownerUsername"), value("friend.username")) &&
+    ["friend.ownerUsername", "friend.username"].some((p) => p in edits);
+  // the same rule as Rust's save check: two features on one port, created by this draft
+  const portClash = (p: string) =>
+    value(p) !== undefined &&
+    PORTS.some((o) => o !== p && value(o) === value(p) && (p in edits || o in edits));
+  const anyPortClash = PORTS.some(portClash);
   const item = (it: Item) => {
     const reason = reasonFor(it, caps, rbx);
     // parent switch off: the value does nothing yet, so the row dims (it stays editable)
@@ -420,6 +437,11 @@ export function SettingsPage() {
           }
         />
         {extras[it.path]?.({ rbx, disabled: !!reason, csErr, pickClientSettings, ownerClash })}
+        {it.kind === "port" && portClash(it.path) && (
+          <p role="alert" className="pb-2 text-13 text-error">
+            {t("set.portClash")}
+          </p>
+        )}
       </div>
     );
   };
@@ -442,9 +464,6 @@ export function SettingsPage() {
                   : "text-text-2 hover:bg-surface-3/60 hover:text-text-1",
               )}
             >
-              {on && (
-                <span className="absolute top-2.5 bottom-2.5 -left-3 w-[3px] rounded-r-[3px] bg-accent" />
-              )}
               <Icon size={18} strokeWidth={1.75} aria-hidden />
               {t(`grp.${g.id}` as MsgKey)}
             </button>
@@ -457,7 +476,7 @@ export function SettingsPage() {
                     aria-current={id === active ? "location" : undefined}
                     onClick={() => goSub(id)}
                     className={clsx(
-                      "h-7 rounded-control px-2.5 text-left text-13 transition-colors duration-[var(--dur-quick)]",
+                      "h-7 rounded-control px-2.5 text-left text-13 transition-colors duration-[var(--dur-quick)] focus-visible:shadow-[var(--focus-ring)]",
                       id === active
                         ? "bg-surface-3/70 font-semibold text-text-1"
                         : "text-text-2 hover:bg-surface-3/60 hover:text-text-1",
@@ -480,10 +499,9 @@ export function SettingsPage() {
     const done = () => useDraft.getState().dropSent(sent);
     set.mutateAsync(draftPatch(sent)).then(done, (e: unknown) => {
       // a failed automation restart comes after the write: the edits are saved
-      const msg = errMessage(e);
-      if (msg.startsWith("Settings saved")) done();
+      if (hasCode(e, "SETTINGS_PARTIAL")) done();
       // the patch was saved; only the OS autostart change failed: keep just that edit
-      else if (msg.startsWith("Start on login could not be changed")) {
+      else if (hasCode(e, "AUTOSTART_FAILED")) {
         const rest = { ...sent };
         delete rest["startup.launchOnLogin"];
         useDraft.getState().dropSent(rest);
@@ -496,7 +514,7 @@ export function SettingsPage() {
       <div className="flex min-h-0 flex-1">
         <aside className="w-56 shrink-0 overflow-y-auto border-r border-hairline px-3 pt-6">
           <h2 className="px-3 pb-3.5 text-16 font-semibold text-text-1">{t("settings.title")}</h2>
-          <label className="mb-4 flex h-8 items-center gap-2 rounded-control bg-field px-2.5 shadow-[inset_0_0_0_1px_var(--hairline)] focus-within:shadow-[var(--focus-ring)]">
+          <label className="mb-4 flex h-[var(--control-h)] items-center gap-2 rounded-control bg-field px-2.5 shadow-[inset_0_0_0_1px_var(--hairline)] focus-within:shadow-[var(--focus-ring)]">
             <Search size={16} strokeWidth={1.75} className="shrink-0 text-text-2" aria-hidden />
             <input
               type="search"
@@ -536,7 +554,7 @@ export function SettingsPage() {
                 {hits.length === 0 && <p className="py-10 text-text-2">{t("settings.noMatch")}</p>}
                 {hits.map(({ g, items }) => (
                   <section key={g.id} className="mb-8">
-                    <h3 className="mb-1 text-12 font-semibold tracking-wider text-text-3 uppercase">
+                    <h3 className="mb-1 text-12 font-medium text-text-3">
                       {t(`grp.${g.id}` as MsgKey)}
                     </h3>
                     <ul>
@@ -606,7 +624,8 @@ export function SettingsPage() {
             <Button
               variant="danger"
               onClick={() => {
-                if (s && defaults) setAll(resetEdits(defaults, s));
+                if (s && defaults)
+                  setAll(resetEdits(defaults, s, GROUPS.flatMap((g) => g.subs).filter(shown)));
                 setAsking(false);
               }}
             >
@@ -636,10 +655,10 @@ export function SettingsPage() {
             </Button>
             <Button
               variant="primary"
-              disabled={n === 0 || set.isPending || ownerClash}
+              disabled={n === 0 || set.isPending || ownerClash || anyPortClash}
               onClick={save}
             >
-              <Check size={16} strokeWidth={2} aria-hidden />
+              <Check size={16} strokeWidth={1.75} aria-hidden />
               {t("settings.save")}
             </Button>
           </>

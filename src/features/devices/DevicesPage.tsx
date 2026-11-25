@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { Laptop, Monitor, RotateCw, Server, Smartphone } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { Sheet } from "@/components/ui/Sheet";
 import { openExternal } from "@/lib/events";
+import { reportError } from "@/lib/report";
 import { call, errMessage, type RemoteConnect, type RemotePeer, type RemotePeers } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
 import { inputCls, listRowCls } from "@/features/settings/controls";
@@ -49,7 +50,7 @@ function TailscaleGate({ st, os }: { st: RemotePeers; os: string | undefined }) 
               className="mt-2.5"
               sm
               variant="primary"
-              onClick={() => void openExternal(DOWNLOAD)}
+              onClick={() => void openExternal(DOWNLOAD).catch(reportError)}
             >
               {t("fs.download")}
             </Button>
@@ -89,12 +90,15 @@ function PairSheet({
     setPaired(null);
     onClose();
   };
+  // only the letters and digits count (shown as "ABCD 2345"): each wrong try burns one of the
+  // host's five, so a short code is never sent
+  const clean = code.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!peer || busy) return;
+    if (!peer || busy || clean.length < 8) return;
     setBusy(true);
     setErr(null);
-    call("remote_pair", { ip: peer.ip, code: code.trim() })
+    call("remote_pair", { ip: peer.ip, code: clean })
       .then(
         (name) => {
           void qc.invalidateQueries({ queryKey: ["remotePeers"] });
@@ -151,7 +155,7 @@ function PairSheet({
             <Button type="button" disabled={busy} onClick={close}>
               {t("set.cancel")}
             </Button>
-            <Button type="submit" variant="primary" disabled={busy || code.trim().length < 8}>
+            <Button type="submit" variant="primary" disabled={busy || clean.length < 8}>
               {busy ? t("dev.pairing") : t("dev.pair")}
             </Button>
           </div>
@@ -164,7 +168,7 @@ function PairSheet({
 /** Other computers on the user's tailnet; pair with and control the ones running RMI. */
 export function DevicesPage() {
   const qc = useQueryClient();
-  const { data, isError, error, isFetching, refetch } = useQuery({
+  const { data, isError, error, refetch } = useQuery({
     queryKey: ["remotePeers"],
     queryFn: () => call("remote_peers"),
     refetchInterval: 10_000,
@@ -180,9 +184,24 @@ export function DevicesPage() {
   const [connecting, setConnecting] = useState<string | null>(null);
   /** ip whose Remove waits for a yes */
   const [asking, setAsking] = useState<string | null>(null);
+  /** ip whose remote_forget is on its way (its confirm row stays, disabled) */
+  const [removing, setRemoving] = useState<string | null>(null);
+  /** ip whose row gets focus back after its confirm row goes (Remove, or Pair once removed) */
+  const [refocus, setRefocus] = useState<string | null>(null);
+  useEffect(() => {
+    if (!refocus) return;
+    document.querySelector<HTMLElement>(`[data-row-act="${refocus}"]`)?.focus();
+    setRefocus(null);
+  }, [refocus]);
+  /** a Refresh the user asked for (the 10 s polls leave the button alone) */
+  const [refreshing, setRefreshing] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const fail = (e: unknown) => setMsg(errMessage(e));
-  const done = () => void qc.invalidateQueries({ queryKey: ["remotePeers"] });
+  // a pairing gone also changes where accounts run and where they can be sent
+  const done = () => {
+    for (const k of ["remotePeers", "elsewhere", "targets"])
+      void qc.invalidateQueries({ queryKey: [k] });
+  };
   const label = (p: RemotePeer) => p.rmi ?? p.name;
   const where = useElsewhere();
   const { data: list } = useAccounts();
@@ -223,7 +242,15 @@ export function DevicesPage() {
           <p className="mt-0.5 mb-2.5 text-13 text-text-2">{t("dev.desc")}</p>
         </div>
         {ready && (
-          <Button sm variant="ghost" disabled={isFetching} onClick={() => void refetch()}>
+          <Button
+            sm
+            variant="ghost"
+            disabled={refreshing}
+            onClick={() => {
+              setRefreshing(true);
+              void refetch().finally(() => setRefreshing(false));
+            }}
+          >
             <RotateCw size={14} strokeWidth={1.75} aria-hidden />
             {t("dev.refresh")}
           </Button>
@@ -239,9 +266,16 @@ export function DevicesPage() {
         </div>
       )}
       {!data && !isError && (
-        <p role="status" className="py-4 text-13 text-text-3">
-          {t("dev.loading")}
-        </p>
+        // skeleton rows shaped like the device rows (DESIGN: loading)
+        <div role="status" aria-label={t("dev.loading")} className="-mx-3 flex flex-col gap-1">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              aria-hidden
+              className="h-14 animate-pulse rounded-control bg-[var(--skeleton)]"
+            />
+          ))}
+        </div>
       )}
       {data && !ready && <TailscaleGate st={data} os={caps?.os} />}
       {ready && data.peers.length === 0 && (
@@ -272,14 +306,34 @@ export function DevicesPage() {
                   <Button
                     sm
                     variant="danger"
+                    disabled={removing === p.ip}
                     onClick={() => {
-                      setAsking(null);
-                      void call("remote_forget", { ip: p.ip }).then(done, fail);
+                      setRemoving(p.ip);
+                      // the row waits for the refetch, so focus lands on its Pair button
+                      void call("remote_forget", { ip: p.ip })
+                        .then(() => {
+                          done();
+                          return qc.refetchQueries({ queryKey: ["remotePeers"] });
+                        }, fail)
+                        .finally(() => {
+                          setRemoving(null);
+                          setAsking(null);
+                          setRefocus(p.ip);
+                        });
                     }}
                   >
                     {t("dev.remove")}
                   </Button>
-                  <Button sm variant="ghost" onClick={() => setAsking(null)}>
+                  <Button
+                    autoFocus
+                    sm
+                    variant="ghost"
+                    disabled={removing === p.ip}
+                    onClick={() => {
+                      setAsking(null);
+                      setRefocus(p.ip);
+                    }}
+                  >
                     {t("set.cancel")}
                   </Button>
                 </div>
@@ -287,9 +341,9 @@ export function DevicesPage() {
                 <>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-14 text-text-1">{label(p)}</p>
-                    <p id={`peer-${p.ip}`} className="text-13 text-text-3">
+                    <p id={`peer-${p.ip}`} className="text-13 text-text-3 tabular-nums">
                       {t(statusKey(p))}
-                      {p.paired && there(p).length > 0 && (
+                      {there(p).length > 0 && (
                         <>
                           {" · "}
                           {there(p).length === 1
@@ -300,45 +354,49 @@ export function DevicesPage() {
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    {p.paired && (
+                      <Button
+                        sm
+                        variant="ghost"
+                        aria-label={t("dev.removeNamed", { name: label(p) })}
+                        data-row-act={p.ip}
+                        onClick={() => setAsking(p.ip)}
+                      >
+                        {t("dev.remove")}
+                      </Button>
+                    )}
+                    {/* also from the computer without the token: the ask rides its report */}
+                    {there(p).length > 0 && (
+                      <Button
+                        sm
+                        aria-describedby={`peer-${p.ip}`}
+                        // offline: it can't let go of them (the status line says Offline)
+                        disabled={!p.online || there(p).some((a) => moving.includes(a.id))}
+                        onClick={() => void runHere(there(p))}
+                      >
+                        {there(p).some((a) => moving.includes(a.id))
+                          ? t("elsewhere.moving")
+                          : t("elsewhere.runAllHere")}
+                      </Button>
+                    )}
                     {p.paired ? (
-                      <>
-                        <Button
-                          sm
-                          variant="ghost"
-                          aria-label={t("dev.removeNamed", { name: label(p) })}
-                          onClick={() => setAsking(p.ip)}
-                        >
-                          {t("dev.remove")}
-                        </Button>
-                        {there(p).length > 0 && (
-                          <Button
-                            sm
-                            aria-describedby={`peer-${p.ip}`}
-                            disabled={there(p).some((a) => moving.includes(a.id))}
-                            onClick={() => void runHere(there(p))}
-                          >
-                            {there(p).some((a) => moving.includes(a.id))
-                              ? t("elsewhere.moving")
-                              : t("elsewhere.runAllHere")}
-                          </Button>
-                        )}
-                        <Button
-                          sm
-                          variant="primary"
-                          aria-label={t("dev.connectNamed", { name: label(p) })}
-                          data-connect={p.ip}
-                          disabled={!p.rmi || !!connecting || !!conn}
-                          onClick={() => connect(p)}
-                        >
-                          {connecting === p.ip ? t("dev.connecting") : t("dev.connect")}
-                        </Button>
-                      </>
+                      <Button
+                        sm
+                        variant="primary"
+                        aria-label={t("dev.connectNamed", { name: label(p) })}
+                        data-connect={p.ip}
+                        disabled={!p.rmi || !!connecting || !!conn}
+                        onClick={() => connect(p)}
+                      >
+                        {connecting === p.ip ? t("dev.connecting") : t("dev.connect")}
+                      </Button>
                     ) : (
                       p.rmi && (
                         <Button
                           sm
                           variant="primary"
                           aria-label={t("dev.pairTitle", { name: label(p) })}
+                          data-row-act={p.ip}
                           onClick={() => {
                             setMsg(null); // an old "Pair again" must not outlive the new pairing
                             setPairing(p);

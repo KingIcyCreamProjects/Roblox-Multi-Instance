@@ -126,7 +126,7 @@ fn seal_file(mut header: Header, dk: &[u8; 32], payload: &VaultPayload) -> Vec<u
     let nonce = crypto::random::<24>();
     header.nonce = B64.encode(nonce);
     let hj = serde_json::to_vec(&header).expect("header serializes");
-    let pt = Zeroizing::new(serde_json::to_vec(payload).expect("payload serializes"));
+    let pt = super::json_wiped(payload, false);
     format::encode(&hj, &crypto::seal_with(dk, &nonce, &pt, &hj))
 }
 
@@ -906,6 +906,34 @@ mod tests {
         let dest = d.path().join("adir");
         fs::create_dir(&dest).unwrap();
         assert!(write_atomic(&dest, b"plaintext", Backup::Skip).is_err());
+        let tmps = fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(tmps, 0);
+    }
+
+    /// Rename fails after the tmp is written (target held open without delete sharing): the
+    /// old file stays as it was and no tmp is left.
+    #[cfg(windows)]
+    #[test]
+    fn failed_rename_keeps_old_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (d, _p) = tmp();
+        let dest = d.path().join("v.rmiv");
+        fs::write(&dest, b"old").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&dest)
+            .unwrap();
+        // the backup copy fails too (source unreadable): it must leave no backup file behind
+        assert!(write_atomic(&dest, b"new", Backup::Throttled).is_err());
+        drop(held);
+        assert_eq!(fs::read(&dest).unwrap(), b"old");
+        let backups = fs::read_dir(backup_dir(&dest)).map_or(0, |r| r.count());
+        assert_eq!(backups, 0);
         let tmps = fs::read_dir(d.path())
             .unwrap()
             .flatten()

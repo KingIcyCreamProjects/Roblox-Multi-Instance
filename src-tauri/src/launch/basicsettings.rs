@@ -55,11 +55,32 @@ fn find() -> Option<PathBuf> {
 const QUALITY: (&str, &str) = ("token", "SavedQualityLevel");
 const FPS: (&str, &str) = ("int", "FramerateCap");
 
-/// Per key (quality, fps): `(user's value before RMI's override, raw text RMI wrote)`;
+/// Per key (quality, fps): `(user's value before RMI's override, raw texts RMI wrote since)`;
 /// inner `None` = the key was absent. Restored when a later launch has no override, unless
-/// the file no longer holds RMI's value (the user changed it in game). Kept in the data dir
-/// so a restart doesn't lose it.
-type Orig = [Option<(Option<String>, String)>; 2];
+/// the file no longer holds one of RMI's values (the user changed it in game). All of them,
+/// not only the last: clients with different caps write theirs back on exit in any order.
+/// Kept in the data dir so a restart doesn't lose it.
+type Orig = [Option<Slot>; 2];
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+struct Slot(
+    Option<String>,
+    #[serde(deserialize_with = "one_or_many")] Vec<String>,
+);
+
+/// Older versions stored one written value as a plain string.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum W {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match serde::Deserialize::deserialize(d)? {
+        W::One(s) => vec![s],
+        W::Many(v) => v,
+    })
+}
 const ORIG_FILE: &str = "basic-settings-orig.json";
 /// Serializes writes.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -102,18 +123,28 @@ fn apply_restoring(xml: &str, orig: &mut Orig, quality: Option<u8>, fps: Option<
     let [q, f] = orig;
     for (slot, k, over) in [(q, QUALITY, quality.is_some()), (f, FPS, fps.is_some())] {
         let cur = get(xml, k);
-        // The file holds the user's value unless it is still the one RMI wrote.
-        let prev = slot.take();
-        let user = match &prev {
-            Some((o, wrote)) if cur.as_deref() == Some(wrote.as_str()) => o.clone(),
-            _ => cur.clone(),
-        };
+        // The file holds the user's value unless it is still one RMI wrote.
+        let ours = |s: &Slot| cur.as_ref().is_some_and(|c| s.1.contains(c));
+        let prev = slot.take().filter(ours);
+        let user = prev.as_ref().map_or_else(|| cur.clone(), |s| s.0.clone());
         if over {
-            *slot = get(&x, k).map(|w| (user, w));
+            *slot = get(&x, k).map(|w| {
+                let mut wrote = prev.map(|s| s.1).unwrap_or_default();
+                if !wrote.contains(&w) {
+                    wrote.push(w);
+                }
+                Slot(user, wrote)
+            });
         } else {
             // Restored from RMI's value: kept, so a still-running override client writing
-            // that value back on exit is recognized again on the next launch.
-            *slot = prev.filter(|(_, w)| cur.as_deref() == Some(w.as_str()));
+            // that value back on exit is recognized again on the next launch. The restored
+            // value itself leaves the list: in the file it is the user's again.
+            *slot = prev
+                .map(|mut s| {
+                    s.1.retain(|w| Some(w) != user.as_ref());
+                    s
+                })
+                .filter(|s| !s.1.is_empty());
             x = match user {
                 Some(v) => set(&x, k.0, k.1, v.as_str()),
                 None => {
@@ -128,15 +159,28 @@ fn apply_restoring(xml: &str, orig: &mut Orig, quality: Option<u8>, fps: Option<
 }
 
 pub fn write(root: &std::path::Path, quality: Option<u8>, fps: Option<u32>) -> io::Result<()> {
+    write_to(root, find, quality, fps)
+}
+
+/// `write` with the settings file lookup passed in (tests use a temp folder).
+fn write_to(
+    root: &std::path::Path,
+    find: impl FnOnce() -> Option<PathBuf>,
+    quality: Option<u8>,
+    fps: Option<u32>,
+) -> io::Result<()> {
     let _g = LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let orig_path = root.join(ORIG_FILE);
-    let mut orig: Orig = std::fs::read(&orig_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    if quality.is_none() && fps.is_none() && orig.iter().all(Option::is_none) {
+    // Missing = nothing recorded. Unreadable or invalid is an error, never "empty": that
+    // would adopt RMI's own value as the user's.
+    let old: Orig = match std::fs::read(&orig_path) {
+        Ok(b) => serde_json::from_slice(&b).map_err(io::Error::other)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Orig::default(),
+        Err(e) => return Err(e),
+    };
+    if quality.is_none() && fps.is_none() && old.iter().all(Option::is_none) {
         return Ok(());
     }
     let Some(path) = find() else {
@@ -144,7 +188,18 @@ pub fn write(root: &std::path::Path, quality: Option<u8>, fps: Option<u32>) -> i
         return Ok(());
     };
     let xml = std::fs::read_to_string(&path)?;
+    let mut orig = old.clone();
     let out = apply_restoring(&xml, &mut orig, quality, fps);
+    // The restore record goes first: a failure from here on still knows the user's value.
+    // A slot this write lets go stays until the file no longer holds RMI's value.
+    let pre: Orig = [0, 1].map(|i| orig[i].clone().or_else(|| old[i].clone()));
+    let save = |o: &Orig| {
+        let v = serde_json::to_value(o).map_err(io::Error::other)?;
+        crate::settings::save(&orig_path, &v)
+    };
+    if pre != old {
+        save(&pre)?;
+    }
     if out == xml && !xml.contains("</Properties>") {
         log::warn!(
             "{} has no <Properties>; graphics and FPS not set",
@@ -164,8 +219,10 @@ pub fn write(root: &std::path::Path, quality: Option<u8>, fps: Option<u32>) -> i
             path.display()
         );
     }
-    let v = serde_json::to_value(&orig).map_err(io::Error::other)?;
-    crate::settings::save(&orig_path, &v)
+    if orig != pre {
+        save(&orig)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -207,7 +264,10 @@ mod tests {
         let b = apply_restoring(&a, &mut orig, None, Some(60));
         let c = apply_restoring(&b, &mut orig, None, None);
         assert!(!c.contains("FramerateCap"), "{c}");
-        assert_eq!(orig, [None, Some((None, "60".into()))]);
+        assert_eq!(
+            orig,
+            [None, Some(Slot(None, vec!["30".into(), "60".into()]))]
+        );
         // once the file no longer holds RMI's value, the slot is let go
         apply_restoring(&c, &mut orig, None, None);
         assert_eq!(orig, Orig::default());
@@ -243,12 +303,69 @@ mod tests {
         let b = apply_restoring(&a, &mut orig, None, None);
         assert!(b.contains(r#"<token name="SavedQualityLevel">10</token>"#));
         // restored raw text goes back as-is: no regex group expansion
-        let mut o: Orig = [Some((Some("$1x".into()), "10".into())), None];
+        let mut o: Orig = [Some(Slot(Some("$1x".into()), vec!["10".into()])), None];
         let c = apply_restoring(XML, &mut o, None, None);
         assert!(
             c.contains(r#"<token name="SavedQualityLevel">$1x</token>"#),
             "{c}"
         );
+    }
+
+    #[test]
+    fn clients_exiting_out_of_order_keep_the_users_value() {
+        let mut orig = Orig::default();
+        let a = apply_restoring(XML, &mut orig, None, Some(60));
+        let b = apply_restoring(&a, &mut orig, None, Some(30));
+        // client A (60) exits after B launched and writes 60 back
+        let a_back = b.replace(">30<", ">60<");
+        let c = apply_restoring(&a_back, &mut orig, None, None);
+        assert!(c.contains(r#"<int name="FramerateCap">240</int>"#), "{c}");
+    }
+
+    #[test]
+    fn users_value_equal_to_an_rmi_value_lets_the_slot_go() {
+        let mut orig = Orig::default();
+        let a = apply_restoring(XML, &mut orig, None, Some(240));
+        let b = apply_restoring(&a, &mut orig, None, Some(30));
+        let c = apply_restoring(&b, &mut orig, None, None);
+        assert!(c.contains(">240<"));
+        apply_restoring(&c, &mut orig, None, None);
+        assert_eq!(orig, Orig::default());
+        // a later in-game change to a value RMI once wrote stays the user's
+        let d = c.replace(">240<", ">30<");
+        assert_eq!(apply_restoring(&d, &mut orig, None, None), d);
+    }
+
+    fn fixture() -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let xml = d.path().join("GlobalBasicSettings_13.xml");
+        std::fs::write(&xml, XML).unwrap();
+        (d, xml)
+    }
+
+    #[test]
+    fn write_restores_across_restarts_and_reads_old_sidecar() {
+        let (d, xml) = fixture();
+        let f = || Some(xml.clone());
+        write_to(d.path(), f, None, Some(30)).unwrap();
+        assert!(std::fs::read_to_string(&xml).unwrap().contains(">30<"));
+        // a sidecar from an older version: one written value as a plain string
+        std::fs::write(d.path().join(ORIG_FILE), r#"[null,["240","30"]]"#).unwrap();
+        write_to(d.path(), f, None, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&xml).unwrap(), XML);
+    }
+
+    #[test]
+    fn unreadable_sidecar_or_failed_record_leaves_the_file() {
+        let (d, xml) = fixture();
+        let f = || Some(xml.clone());
+        std::fs::write(d.path().join(ORIG_FILE), "{bad").unwrap();
+        assert!(write_to(d.path(), f, None, Some(30)).is_err());
+        assert_eq!(std::fs::read_to_string(&xml).unwrap(), XML);
+        // the restore record can't be saved: Roblox's file is not touched
+        let gone = d.path().join("missing-dir");
+        assert!(write_to(&gone, f, None, Some(30)).is_err());
+        assert_eq!(std::fs::read_to_string(&xml).unwrap(), XML);
     }
 
     #[test]

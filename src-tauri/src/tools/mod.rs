@@ -580,11 +580,14 @@ fn label(v: &str) -> String {
 const FOLLOW_KEY: &str = "joinme";
 const INVITE_KEY: &str = "privateserver";
 
+/// The one key containing `needle`; none when several match (never write a wrong setting).
 fn privacy_key<'a>(v: &'a Value, needle: &str) -> Option<&'a str> {
-    v.as_object()?
+    let mut m = v
+        .as_object()?
         .keys()
-        .find(|k| k.to_lowercase().contains(needle))
-        .map(String::as_str)
+        .filter(|k| k.to_lowercase().contains(needle));
+    let k = m.next()?;
+    m.next().is_none().then_some(k.as_str())
 }
 
 fn setting(v: &Value) -> (String, Vec<PrivacyOption>) {
@@ -905,8 +908,12 @@ pub async fn tool_export_summary(
     let path = path
         .into_path()
         .map_err(|_| "Pick a file on this PC.".to_string())?;
-    let text = serde_json::to_string_pretty(&json).expect("json serializes");
-    std::fs::write(&path, text).map_err(|e| format!("Could not save the file: {e}"))?;
+    // Off the async worker; temp file + rename, so a failed write keeps the old file.
+    let p2 = path.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::settings::save(&p2, &json))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("Could not save the file: {e}"))?;
     Ok(Some(json!({"path": path.display().to_string()})))
 }
 
@@ -947,10 +954,28 @@ pub async fn outfit_wear(
     outfit_id: u64,
     account_id: String,
 ) -> CmdResult<Value> {
-    let (missing, _) = with_acct(&ch(&app), &state, &account_id, |c: Arc<RobloxClient>, a: Arc<Acct>| async move {
-        avatar::wear(&c, &a.ck, outfit_id).await
-    })
+    let ((missing, user_id), _) = with_acct(
+        &ch(&app),
+        &state,
+        &account_id,
+        |c: Arc<RobloxClient>, a: Arc<Acct>| async move {
+            avatar::wear(&c, &a.ck, outfit_id)
+                .await
+                .map(|m| (m, a.user_id))
+        },
+    )
     .await?;
+    // New look: drop the cached headshot and full-body image, then fetch again in the
+    // background (Roblox may still serve the old image for a moment).
+    let app2 = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let st = tauri::Manager::state::<AppState>(&app2);
+        for size in [48, 420] {
+            let _ = std::fs::remove_file(crate::accounts::cmds::thumb_file(&st, user_id, size));
+        }
+    })
+    .await;
+    crate::accounts::sync::kick_headshots(&app);
     let missing: Vec<Value> = missing
         .into_iter()
         .map(|(id, name)| {
@@ -1322,6 +1347,9 @@ mod tests {
         );
         assert_eq!(p.private_server_invite_options[0].value, "Friends");
         assert!(parse_privacy(&json!({})).is_none());
+        // two keys match: ambiguous, so nothing is read or written
+        let two = json!({"aPrivateServerX": 1, "whoCanInviteMeToPrivateServers": 2});
+        assert_eq!(privacy_key(&two, INVITE_KEY), None);
     }
 
     #[test]

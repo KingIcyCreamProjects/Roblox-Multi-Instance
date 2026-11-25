@@ -2,9 +2,12 @@ import { X } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { useUi } from "@/app/store";
-import { ACTIVITY_EVENT, type RemoteConnect } from "@/lib/ipc";
+import { ACTIVITY_EVENT, inTauri, type RemoteConnect } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
 import { loadViewer } from "./viewer";
+
+/** The viewer's connection dot while its socket is open (hello received). */
+const CONNECTED = '.rv-dot[data-tone="ok"], .rv-dot[data-tone="warn"]';
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -39,8 +42,14 @@ export function RemoteSession({
     useUi.setState({ remoteOpen: true });
     // a live session counts as activity for the idle auto-lock even when the user only
     // watches it (locking would end the session); 20 s keeps the throttled vault_touch
-    // calls in App under the shortest auto-lock time (1 minute)
-    const alive = setInterval(() => window.dispatchEvent(new Event(ACTIVITY_EVENT)), 20_000);
+    // calls in App under the shortest auto-lock time (1 minute). Counts while shown and
+    // connected, also on the other computer's lock screen or a terminal-only view: the viewer's
+    // status dot is "ok" or "warn" then (warn also covers a brief reconnect), "bad" once the
+    // session ended or failed, empty while connecting. A hidden window leaves the idle timer alone.
+    const alive = setInterval(() => {
+      if (document.visibilityState === "visible" && mount.current?.querySelector(CONNECTED))
+        window.dispatchEvent(new Event(ACTIVITY_EVENT));
+    }, 20_000);
     return () => {
       clearInterval(alive);
       useUi.setState({ remoteOpen: false });
@@ -49,6 +58,8 @@ export function RemoteSession({
   }, []);
 
   useEffect(() => {
+    // the browser preview's mock peers are fixtures: no socket at all from there
+    if (!inTauri) return;
     let handle: { close: () => void } | null = null;
     let gone = false;
     loadViewer().then(
@@ -107,10 +118,10 @@ export function RemoteSession({
       onKeyUp={stop}
       className="fixed inset-x-0 top-[var(--titlebar-h)] bottom-0 z-50 flex flex-col bg-bg outline-none"
     >
-      {missing ? (
+      {missing || !inTauri ? (
         <div className="m-auto flex max-w-md flex-col items-start gap-3 p-8">
           <p role="alert" className="text-14 text-text-1">
-            {t("dev.viewerMissing")}
+            {t(inTauri ? "dev.viewerMissing" : "dev.previewOnly")}
           </p>
           <Button onClick={() => onClose()}>
             <X size={16} strokeWidth={1.75} aria-hidden />

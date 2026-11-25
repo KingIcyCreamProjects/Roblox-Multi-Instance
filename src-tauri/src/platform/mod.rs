@@ -41,8 +41,10 @@ pub trait Platform: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn roblox_install(&self) -> Option<RobloxInstall>;
     fn open_uri(&self, uri: &str) -> std::io::Result<()>;
-    fn roblox_running(&self) -> bool {
-        false
+    /// `None`: the process list could not be read. Unknown is never "nothing runs": callers
+    /// keep the mutex, launch nothing and report no close.
+    fn roblox_running(&self) -> Option<bool> {
+        Some(false)
     }
     /// Close idle Roblox tray players (they own the singleton mutex). Blocking. Called before
     /// a launch takes the mutex.
@@ -79,16 +81,19 @@ pub trait Platform: Send + Sync {
     ) -> std::io::Result<()> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
-    /// Running Roblox client pids launched with this tracker id.
-    fn tracked_pids(&self, _tracker_id: &str) -> Vec<u32> {
-        vec![]
+    /// Running Roblox client pids launched with this tracker id. `None`: unknown (see
+    /// `roblox_running`).
+    fn tracked_pids(&self, _tracker_id: &str) -> Option<Vec<u32>> {
+        Some(vec![])
     }
-    /// Running clients of any of `trackers`: `(pid, tracker id)`. Blocking.
-    fn tracked_clients(&self, trackers: &[String]) -> Vec<(u32, String)> {
-        trackers
-            .iter()
-            .flat_map(|t| self.tracked_pids(t).into_iter().map(|p| (p, t.clone())))
-            .collect()
+    /// Running clients of any of `trackers`: `(pid, tracker id)`. `None`: unknown (see
+    /// `roblox_running`). Blocking.
+    fn tracked_clients(&self, trackers: &[String]) -> Option<Vec<(u32, String)>> {
+        let mut out = vec![];
+        for t in trackers {
+            out.extend(self.tracked_pids(t)?.into_iter().map(|p| (p, t.clone())));
+        }
+        Some(out)
     }
     /// Minimize the windows of these `(pid, tracker id)` clients, re-checking each pid is
     /// still that tracker's Roblox player. Returns windows minimized.
@@ -127,6 +132,9 @@ impl Platform for Null {
     }
 }
 
+/// Error of a close that could not read the process list (`close_tracked`).
+pub(crate) const UNREADABLE: &str = "Could not read the running processes.";
+
 /// OS resource released on drop.
 pub trait Held: Send {
     /// Still held? `false` (e.g. the holder process died) makes the next sync re-acquire.
@@ -149,4 +157,40 @@ pub fn current() -> Box<dyn Platform> {
     return Box::new(macos::MacOs);
     #[cfg(target_os = "linux")]
     return Box::new(linux::Linux);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Null`, but its process list could not be read.
+    struct Unknown;
+    impl Platform for Unknown {
+        fn capabilities(&self) -> Capabilities {
+            Null.capabilities()
+        }
+        fn roblox_install(&self) -> Option<RobloxInstall> {
+            Null.roblox_install()
+        }
+        fn open_uri(&self, uri: &str) -> std::io::Result<()> {
+            Null.open_uri(uri)
+        }
+        fn roblox_running(&self) -> Option<bool> {
+            None
+        }
+        fn tracked_pids(&self, _: &str) -> Option<Vec<u32>> {
+            None
+        }
+    }
+
+    #[test]
+    fn an_unknown_process_list_stays_unknown() {
+        let t = ["7".to_owned()];
+        assert_eq!(Unknown.tracked_clients(&t), None, "never read as none run");
+        assert_eq!(Unknown.tracked_clients(&[]), Some(vec![]), "nothing asked");
+        // Null knows nothing runs.
+        assert_eq!(Null.tracked_clients(&t), Some(vec![]));
+        assert_eq!(Null.roblox_running(), Some(false));
+        assert_eq!(Unknown.roblox_running(), None);
+    }
 }

@@ -128,6 +128,7 @@ pub fn start(
         .spawn(move || run(&*desk, &flag, &alive, &out, &q))
     {
         log::error!("remote: sound thread failed to start: {e}");
+        on.store(false, SeqCst); // not running: a later "audio on" tries again
     }
     on
 }

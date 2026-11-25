@@ -4,9 +4,7 @@ import { Clock, Lock, TriangleAlert, User } from "lucide-react";
 import { useEffect, useState } from "react";
 import { presenceKey } from "@/features/accounts/AccountRow";
 import { call, errMessage, type Preview } from "@/lib/ipc";
-import { t, type MsgKey } from "@/lib/i18n";
-
-const nf = new Intl.NumberFormat();
+import { fmtInt, t, type MsgKey } from "@/lib/i18n";
 
 function useDebounced<T>(v: T, ms: number) {
   const [d, setD] = useState(v);
@@ -90,7 +88,7 @@ function chipBody(p: Preview) {
       {p.kind === "private" && <Lock size={12} strokeWidth={2} aria-label={t("pv.private")} />}
       {p.playing != null && (
         <span className="shrink-0 tnum">
-          {nf.format(p.playing)}
+          {fmtInt(p.playing)}
           <span className="@max-[52rem]:sr-only"> {t("pv.playing")}</span>
         </span>
       )}

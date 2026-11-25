@@ -4,6 +4,7 @@ import { Check } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { openExternal } from "@/lib/events";
+import { reportError } from "@/lib/report";
 import { call, errMessage, type TsError, type TsStatus } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
 
@@ -65,7 +66,7 @@ export function Step({
       >
         {state === "done" ? (
           <>
-            <Check size={14} strokeWidth={2.25} aria-hidden />
+            <Check size={14} strokeWidth={1.75} aria-hidden />
             <span className="sr-only">{t("fs.done")}</span>
           </>
         ) : (
@@ -82,7 +83,7 @@ export function Step({
                 state === "done"
                   ? "text-online"
                   : state === "current"
-                    ? "text-accent"
+                    ? "text-accent-text"
                     : "text-text-3",
               )}
             >
@@ -143,7 +144,7 @@ export function FriendSetup({ onManual }: { onManual: () => void }) {
                 className="mt-2.5"
                 sm
                 variant="primary"
-                onClick={() => void openExternal(DOWNLOAD)}
+                onClick={() => void openExternal(DOWNLOAD).catch(reportError)}
               >
                 {t("fs.download")}
               </Button>
@@ -167,7 +168,11 @@ export function FriendSetup({ onManual }: { onManual: () => void }) {
               <p className="text-13 text-text-2">{t("fs.admin.d")}</p>
               <div className="flex flex-wrap gap-2">
                 {err.url && (
-                  <Button sm variant="primary" onClick={() => void openExternal(err.url!)}>
+                  <Button
+                    sm
+                    variant="primary"
+                    onClick={() => void openExternal(err.url!).catch(reportError)}
+                  >
                     {t("fs.admin.open")}
                   </Button>
                 )}

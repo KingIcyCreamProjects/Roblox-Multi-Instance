@@ -35,7 +35,7 @@ pub fn spawn(app: tauri::AppHandle) {
             {
                 continue;
             }
-            if !st.platform.roblox_running() {
+            if st.platform.roblox_running() != Some(true) {
                 continue; // try again as soon as something runs
             }
             let n = st.platform.nudge();

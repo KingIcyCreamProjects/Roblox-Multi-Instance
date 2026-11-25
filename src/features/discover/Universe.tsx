@@ -79,7 +79,7 @@ export function Universe() {
           <IconButton
             label={t("universe.copyId")}
             className="size-6"
-            onClick={() => void copyText(String(q.data.universeId), t("universe.id"))}
+            onClick={() => void copyText(String(q.data.universeId), t("copy.universeId"))}
           >
             <Copy size={12} strokeWidth={1.75} />
           </IconButton>

@@ -199,8 +199,10 @@ pub fn run() {
                         // hidden-in-tray must not persist into the next start
                         - tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
-                // placed fresh each session (top centre of the primary monitor)
-                .with_denylist(&[remote::INDICATOR])
+                // Main window only: the indicator is placed fresh each session (top centre of the
+                // primary monitor), and runtime windows (identify-N, login-*, site-*) must not
+                // be moved to stale spots or pile up in the state file.
+                .with_filter(|label| label == "main")
                 .build(),
         );
     }
@@ -297,6 +299,8 @@ pub fn run() {
             remote::viewer::remote_forget,
             remote::handover::remote_elsewhere,
             remote::handover::remote_run_here,
+            remote::handover::remote_targets,
+            remote::handover::remote_send,
             homelab_get::homelab_latest,
             homelab_get::homelab_download,
             commands::automation_snapshot,
@@ -474,7 +478,17 @@ pub fn run() {
                     .ok()
                     .flatten();
                     if start_automation {
-                        if let Err(e) = automation.start().await {
+                        // Same short retry as friend_sync: a port held for a moment by the
+                        // previous process (update restart) must not leave automation stopped.
+                        let mut r = automation.start().await;
+                        for _ in 1..3 {
+                            if r.is_ok() {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            r = automation.start().await;
+                        }
+                        if let Err(e) = r {
                             log::error!("automation start failed: {e}");
                         }
                         commands::state_changed(&h, &["autoStatus"]);
@@ -516,7 +530,11 @@ pub fn run() {
         .map(|app| {
             app.run(|app, e| match e {
                 // every exit path (tray Quit, last window closed, Cmd+Q) ends here
-                tauri::RunEvent::Exit => tauri::async_runtime::block_on(shell::shutdown(app)),
+                tauri::RunEvent::Exit => {
+                    tauri::async_runtime::block_on(shell::shutdown(app));
+                    // RMI's graphics / FPS override must not outlive RMI
+                    commands::restore_basic_settings(&app.state::<AppState>(), true);
+                }
                 // macOS: Dock icon click with the window hidden in the menu bar
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { .. } => shell::show_main(app),

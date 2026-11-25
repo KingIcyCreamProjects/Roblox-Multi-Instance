@@ -491,7 +491,7 @@ pub fn arrange_grid(
 /// windows (moving them would block) and accounts ranked `keep` or later (not picked).
 pub fn ordered_windows(order: &[(String, String)], keep: usize) -> Vec<(usize, u32, HWND)> {
     crate::grid::slots(
-        game_windows(&process_ids(PLAYER_EXE))
+        game_windows(&process_ids(PLAYER_EXE).unwrap_or_default())
             .into_iter()
             // SAFETY: hw from EnumWindows; a stale one reads as not hung.
             .filter(|&(_, hw)| unsafe { IsHungAppWindow(hw) } == 0)
@@ -719,13 +719,15 @@ impl Platform for Windows {
         }
     }
 
-    fn roblox_running(&self) -> bool {
-        !process_ids(PLAYER_EXE).is_empty()
+    fn roblox_running(&self) -> Option<bool> {
+        process_ids(PLAYER_EXE).map(|p| !p.is_empty())
     }
 
     fn close_tracked(&self, tracker_id: &str) -> io::Result<usize> {
         let mut n = 0;
-        for pid in process_ids(PLAYER_EXE) {
+        // Unknown is not "nothing to close": a caller must not report the client closed.
+        let pids = process_ids(PLAYER_EXE).ok_or_else(|| io::Error::other(super::UNREADABLE))?;
+        for pid in pids {
             match close_verified(pid, None, Some(tracker_id)) {
                 Ok(true) => n += 1,
                 Ok(false) => log::warn!("Roblox pid {pid} survived the close"),
@@ -740,19 +742,13 @@ impl Platform for Windows {
         close_verified(pid, None, Some(tracker_id)).map_err(io::Error::other)
     }
 
-    fn tracked_pids(&self, tracker_id: &str) -> Vec<u32> {
-        tracked_pids(tracker_id)
+    fn tracked_pids(&self, tracker_id: &str) -> Option<Vec<u32>> {
+        let all = tracked_clients(&[tracker_id.to_owned()])?;
+        Some(all.into_iter().map(|(p, _)| p).collect())
     }
 
-    fn tracked_clients(&self, trackers: &[String]) -> Vec<(u32, String)> {
-        process_ids(PLAYER_EXE)
-            .into_iter()
-            .filter_map(|p| {
-                let c = cmdline(p)?;
-                let t = trackers.iter().find(|t| has_tracker(&c, t))?;
-                Some((p, t.clone()))
-            })
-            .collect()
+    fn tracked_clients(&self, trackers: &[String]) -> Option<Vec<(u32, String)>> {
+        tracked_clients(trackers)
     }
 
     fn minimize(&self, clients: &[(u32, String)]) -> usize {
@@ -787,7 +783,7 @@ impl Platform for Windows {
     fn nudge(&self) -> usize {
         // Hung windows skipped (as Grid Arrange does): a sync ShowWindow on one would block
         // the anti-AFK thread for every client.
-        let wins: Vec<HWND> = game_windows(&process_ids(PLAYER_EXE))
+        let wins: Vec<HWND> = game_windows(&process_ids(PLAYER_EXE).unwrap_or_default())
             .into_iter()
             .map(|(_, w)| w)
             // SAFETY: plain query on a window handle from EnumWindows.
@@ -901,7 +897,7 @@ impl Platform for Windows {
     fn hold_multi(&self) -> io::Result<Guard> {
         let r = match ensure_holder() {
             Ok(()) => return Ok(Box::new(HolderGuard)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+            Err(e) if !in_process_fallback(e.kind()) => Err(e),
             Err(e) => {
                 // Fallback: released when RMI exits, which closes waiting Roblox clients.
                 log::warn!("mutex holder process failed ({e}); holding the mutex in-process");
@@ -1030,9 +1026,23 @@ pub fn run_holder(main_exe: &str) -> i32 {
     0
 }
 
+/// Hold the mutex inside RMI after `ensure_holder` failed this way? Never when someone else
+/// has it (`AlreadyExists`) or a holder is still starting (`TimedOut`): the in-process hold
+/// is released when RMI exits (an update restart too), which closes waiting clients, and a
+/// late holder is picked up on the next sync.
+fn in_process_fallback(kind: io::ErrorKind) -> bool {
+    !matches!(kind, io::ErrorKind::AlreadyExists | io::ErrorKind::TimedOut)
+}
+
+/// After a holder that did not answer: no second one spawned for this long (the first may
+/// still come up and take the mutex).
+const HOLDER_PENDING: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Make sure a holder process owns the Roblox mutex, spawning one if none runs.
-/// `AlreadyExists` = someone else (a Roblox client) has it.
+/// `AlreadyExists` = someone else (a Roblox client) has it. `TimedOut` = a holder was
+/// started but has not answered yet.
 fn ensure_holder() -> io::Result<()> {
+    static PENDING: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     use std::io::BufRead;
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -1049,6 +1059,10 @@ fn ensure_holder() -> io::Result<()> {
             CloseHandle(m);
             return Err(io::ErrorKind::AlreadyExists.into());
         }
+    }
+    let since = *PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if since.is_some_and(|t| t.elapsed() < HOLDER_PENDING) {
+        return Err(io::ErrorKind::TimedOut.into());
     }
     let cur = std::env::current_exe()?;
     let main = cur
@@ -1079,10 +1093,27 @@ fn ensure_holder() -> io::Result<()> {
         .creation_flags(base | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
         .or_else(|_| cmd.creation_flags(base).spawn())?;
-    let mut line = String::new();
+    // Bounded wait for its first line (a scan of the fresh copy can stall it): a timed-out
+    // holder is left running; one that does take the mutex is found on the next sync.
+    let (tx, rx) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
-        io::BufReader::new(out).read_line(&mut line)?;
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = tx.send(io::BufReader::new(out).read_line(&mut line).map(|_| line));
+        });
     }
+    let line = match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(r) => r?,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            *PENDING.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(std::time::Instant::now());
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "mutex holder process did not answer",
+            ));
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => String::new(),
+    };
     match line.trim() {
         "ok" => {
             log::info!("mutex holder process {} started", child.id());
@@ -1251,7 +1282,8 @@ fn utf16z(b: &[u16]) -> String {
 }
 
 /// Every running process as (pid, exe file name). `None`: the snapshot could not be taken
-/// (it can fail when the system is short on memory), which is not the same as "none run".
+/// (it can fail when the system is short on memory) or does not list this process, which is
+/// not the same as "none run".
 fn processes() -> Option<Vec<(u32, String)>> {
     let mut out = vec![];
     // SAFETY: snapshot handle checked and closed; entry sized per API contract.
@@ -1269,14 +1301,18 @@ fn processes() -> Option<Vec<(u32, String)>> {
         }
         CloseHandle(snap);
     }
-    (!out.is_empty()).then_some(out)
+    let me = std::process::id();
+    out.iter().any(|(p, _)| *p == me).then_some(out)
 }
 
-fn process_ids(exe: &str) -> Vec<u32> {
-    let all = processes().unwrap_or_default().into_iter();
-    all.filter(|(_, n)| n.eq_ignore_ascii_case(exe))
-        .map(|(p, _)| p)
-        .collect()
+/// `None`: unknown (see `processes`).
+fn process_ids(exe: &str) -> Option<Vec<u32>> {
+    let all = processes()?.into_iter();
+    Some(
+        all.filter(|(_, n)| n.eq_ignore_ascii_case(exe))
+            .map(|(p, _)| p)
+            .collect(),
+    )
 }
 
 /// Another process's command line (`ProcessCommandLineInformation`, Win 8.1+).
@@ -1346,7 +1382,7 @@ fn idle_tray(cmd: &str, game_window: bool) -> bool {
 /// Close idle tray players so the launch starts a fresh, tracked client. One that already
 /// hosts a game (game window up) is left alone.
 fn close_idle_trays() {
-    for pid in process_ids(PLAYER_EXE) {
+    for pid in process_ids(PLAYER_EXE).unwrap_or_default() {
         let (Some(c), Some(ms)) = (cmdline(pid), start_ms(pid)) else {
             continue;
         };
@@ -1361,6 +1397,7 @@ fn close_idle_trays() {
     }
     // After the closes, and with no tray too: an earlier one may have left it stale.
     let mut exes: Vec<String> = process_ids(PLAYER_EXE)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(image)
         .collect();
@@ -1426,11 +1463,26 @@ fn image(pid: u32) -> Option<String> {
     }
 }
 
-fn tracked_pids(t: &str) -> Vec<u32> {
-    process_ids(PLAYER_EXE)
-        .into_iter()
-        .filter(|&p| cmdline(p).is_some_and(|c| has_tracker(&c, t)))
-        .collect()
+/// Running players of any of `trackers`: `(pid, tracker id)`. `None`: unknown, also when a
+/// player opened but its command line could not be read. One that cannot be opened has
+/// exited or is another user's, so not RMI's.
+fn tracked_clients(trackers: &[String]) -> Option<Vec<(u32, String)>> {
+    let mut out = vec![];
+    for p in process_ids(PLAYER_EXE)? {
+        // SAFETY: handle checked, closed by `Handle`.
+        let c = unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, p);
+            if h.is_null() {
+                continue;
+            }
+            let h = Handle(h);
+            cmdline_of(h.0)?
+        };
+        if let Some(t) = trackers.iter().find(|t| has_tracker(&c, t)) {
+            out.push((p, t.clone()));
+        }
+    }
+    Some(out)
 }
 
 /// SAFETY: `h` is a process handle with QUERY_LIMITED_INFORMATION.
@@ -1850,6 +1902,14 @@ mod tests {
     #[test]
     fn own_cmdline_readable() {
         assert!(cmdline(std::process::id()).is_some_and(|c| !c.is_empty()));
+    }
+
+    #[test]
+    fn slow_or_blocked_holder_never_falls_back_in_process() {
+        use io::ErrorKind::*;
+        assert!(!in_process_fallback(TimedOut), "late holder: next sync");
+        assert!(!in_process_fallback(AlreadyExists), "Roblox has it");
+        assert!(in_process_fallback(NotFound), "holder exe could not start");
     }
 
     #[test]

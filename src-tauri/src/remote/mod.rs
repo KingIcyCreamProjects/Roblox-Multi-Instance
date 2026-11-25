@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
@@ -171,17 +171,26 @@ fn bye_msg(code: &str, by: Option<&str>) -> Value {
 /// U+200D (zero-width non-joiner and joiner) stay: Persian, Indic scripts and emoji need them.
 pub fn clean_name(s: &str) -> String {
     s.chars()
-        .filter(|c| {
-            !c.is_control()
-                && !matches!(c, '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}' | '\u{200e}' | '\u{200f}'
-                    | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'
-                    | '\u{fff9}'..='\u{fffb}')
-        })
+        .filter(|c| !c.is_control() && !invisible(*c))
         .collect::<String>()
         .trim()
         .chars()
         .take(40)
         .collect()
+}
+
+/// Seconds since 1970: a set-aside `.bad-<n>` file never replaces an earlier one.
+pub(crate) fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// An invisible format character a name must not carry (see `clean_name`; upload names too).
+pub(crate) fn invisible(c: char) -> bool {
+    matches!(c, '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}' | '\u{200e}' | '\u{200f}'
+        | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,7 +277,13 @@ type Hook = Arc<dyn Fn() + Send + Sync>;
 struct Inner {
     settings: Arc<Mutex<Value>>,
     file: PathBuf,
+    /// `file` was there but could not be read at start: never saved over this run (its
+    /// pairings are not lost to an empty list).
+    unread: bool,
     store: Mutex<Store>,
+    /// The last store change numbered (under the `store` lock), and the last one on disk.
+    seq: AtomicU64,
+    saved: Mutex<u64>,
     code: Mutex<Option<Code>>,
     live: Mutex<Option<Live>>,
     stop: Mutex<Option<oneshot::Sender<&'static str>>>,
@@ -289,8 +304,22 @@ struct Inner {
     hosts: Mutex<HashMap<String, Report>>,
     /// Hand-overs waiting for a paired computer's next report, by paired id.
     wants: Mutex<HashMap<String, (Instant, Vec<u64>)>>,
+    /// When the report that carried the last hand-over ask to each paired computer came.
+    carried: Mutex<HashMap<String, Instant>>,
+    /// Sends (Run on) waiting for a paired computer's next report, by paired id.
+    launches: Mutex<HashMap<String, (Instant, Vec<u64>)>>,
+    /// A waiting send's operation and `launched` answer, by paired id.
+    acks: Mutex<HashMap<String, Ack>>,
     /// Woken after every stored report (a queued hand-over checks it).
     tick: Notify,
+}
+
+/// A waiting send (Run on) to a computer that holds this one's token.
+struct Ack {
+    /// Its operation id: a late answer to an earlier send must not settle this one.
+    op: u64,
+    /// The ids that computer said it started (`launched`), once it answered.
+    launched: Option<Vec<u64>>,
 }
 
 /// A computer's report: when, its name, the Roblox user ids with a client there.
@@ -301,9 +330,27 @@ struct Report {
     ip: String,
     /// It takes hand-overs (an older RMI does not).
     handover: bool,
+    /// It takes sent accounts (Run on; 1.0.3 does not).
+    launch: bool,
 }
 
 type Ctx = Arc<Inner>;
+
+/// A store change to write: (its number, the bytes).
+type Snap = (u64, Result<Vec<u8>, String>);
+
+/// `Inner::write` on a blocking thread.
+async fn save(c: &Ctx, snap: Snap) -> Result<(), String> {
+    let c = c.clone();
+    tokio::task::spawn_blocking(move || c.write(snap))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// A Run here / Run on with more accounts than a paired computer takes at once.
+fn too_many() -> String {
+    format!("Pick at most {MAX_RUNNING} accounts at a time.")
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -364,13 +411,35 @@ impl Inner {
         }
     }
 
-    fn save(&self, st: &Store) -> Result<(), String> {
-        let r = serde_json::to_vec_pretty(st)
-            .map_err(|e| e.to_string())
-            .and_then(|b| {
-                crate::vault::store::write_atomic(&self.file, &b, crate::vault::store::Backup::Skip)
-                    .map_err(|e| e.to_string())
-            });
+    /// The store's bytes and their place in line. Under the `store` lock: that is the order
+    /// the changes happened in.
+    fn snap(&self, st: &Store) -> Snap {
+        let n = self.seq.fetch_add(1, SeqCst) + 1;
+        (n, serde_json::to_vec_pretty(st).map_err(|e| e.to_string()))
+    }
+
+    /// Writes `snap` (new file first, then swapped in) unless a later one is on disk already.
+    /// Blocking: never under the `store` lock or on an async thread (see `save`).
+    fn write(&self, (n, b): Snap) -> Result<(), String> {
+        let r = if self.unread {
+            Err(format!(
+                "{STORE_FILE} could not be read at start; not saved over"
+            ))
+        } else {
+            b.and_then(|b| {
+                let mut done = lock(&self.saved);
+                if *done < n {
+                    crate::vault::store::write_atomic(
+                        &self.file,
+                        &b,
+                        crate::vault::store::Backup::Skip,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    *done = n;
+                }
+                Ok(())
+            })
+        };
         if let Err(e) = &r {
             log::error!("remote: could not save paired devices: {e}");
         }
@@ -438,6 +507,15 @@ impl Inner {
             let _ = tx.send(code);
         }
     }
+
+    /// Drops `ids` from what the computer at `ip` last said it runs (both directions).
+    fn forget(&self, ip: &str, ids: &[u64]) {
+        for m in [&self.hosts, &self.peers] {
+            for r in lock(m).values_mut().filter(|r| r.ip == ip) {
+                r.ids.retain(|i| !ids.contains(i));
+            }
+        }
+    }
 }
 
 struct Running {
@@ -455,13 +533,14 @@ impl Remote {
     /// `root`: data folder (`remote.json` lives there). `desk`: `desk::system()` in the app.
     pub fn new(settings: Arc<Mutex<Value>>, root: &std::path::Path, desk: Arc<dyn Desk>) -> Self {
         let file = root.join(STORE_FILE);
+        let mut unread = false;
         let mut store: Store = match std::fs::read(&file) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
                 // kept aside, never overwritten by the next save
-                let bad = file.with_extension("json.bad");
+                let bad = file.with_extension(format!("json.bad-{}", unix_secs()));
                 match std::fs::rename(&file, &bad) {
                     Ok(()) => log::error!(
-                        "remote: {STORE_FILE} unreadable ({e}); kept as {STORE_FILE}.bad, starting empty"
+                        "remote: {STORE_FILE} unreadable ({e}); kept as {STORE_FILE}.bad-<time>, starting empty"
                     ),
                     Err(re) => log::error!(
                         "remote: {STORE_FILE} unreadable ({e}) and could not be set aside ({re})"
@@ -469,7 +548,14 @@ impl Remote {
                 }
                 Store::default()
             }),
-            Err(_) => Store::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
+            // held by a scanner, no access: not "no pairings" (an empty list must not be
+            // saved over it)
+            Err(e) => {
+                log::error!("remote: {STORE_FILE} could not be read ({e}); paired devices are off until RMI restarts");
+                unread = true;
+                Store::default()
+            }
         };
         let n = store.paired.len();
         store
@@ -485,7 +571,10 @@ impl Remote {
             c: Arc::new(Inner {
                 settings,
                 file,
+                unread,
                 store: Mutex::new(store),
+                seq: AtomicU64::new(0),
+                saved: Mutex::new(0),
                 code: Mutex::default(),
                 live: Mutex::default(),
                 stop: Mutex::default(),
@@ -499,6 +588,9 @@ impl Remote {
                 local: RwLock::default(),
                 hosts: Mutex::default(),
                 wants: Mutex::default(),
+                carried: Mutex::default(),
+                launches: Mutex::default(),
+                acks: Mutex::default(),
                 tick: Notify::new(),
             }),
             running: tokio::sync::Mutex::new(None),
@@ -532,12 +624,14 @@ impl Remote {
             ids,
             ip: String::new(),
             handover: true,
+            launch: true,
         };
         lock(&self.c.peers).insert(peer.into(), r);
     }
 
-    /// What the computer at `ip` (this one holds its token) answered a report with.
-    pub(crate) fn note_host(&self, ip: &str, name: &str, mut ids: Vec<u64>) {
+    /// What the computer at `ip` (this one holds its token) answered a report with; `launch`:
+    /// it takes sent accounts.
+    pub(crate) fn note_host(&self, ip: &str, name: &str, mut ids: Vec<u64>, launch: bool) {
         ids.truncate(MAX_RUNNING);
         let r = Report {
             at: Instant::now(),
@@ -545,6 +639,7 @@ impl Remote {
             ids,
             ip: ip.into(),
             handover: true,
+            launch,
         };
         lock(&self.c.hosts).insert(ip.into(), r);
     }
@@ -592,53 +687,83 @@ impl Remote {
         F: Fn(String, String, Vec<u64>) -> Fut,
         Fut: std::future::Future<Output = Result<Vec<u64>, String>>,
     {
+        if ids.len() > MAX_RUNNING {
+            return Err(too_many());
+        }
+        // Every computer that lists them, not `elsewhere`'s one row per account: two computers
+        // running one account must both let go.
         let mut by: Vec<(String, String, Vec<u64>)> = Vec::new();
-        for e in self
-            .elsewhere()
-            .into_iter()
-            .filter(|e| ids.contains(&e.user_id))
-        {
-            match by.iter_mut().find(|g| g.0 == e.ip) {
-                Some(g) => g.2.push(e.user_id),
-                None => by.push((e.ip, e.device, vec![e.user_id])),
+        for m in [&self.c.hosts, &self.c.peers] {
+            for r in lock(m).values().filter(|r| r.at.elapsed() < PEER_TTL) {
+                for &i in r.ids.iter().filter(|i| ids.contains(i)) {
+                    match by.iter_mut().find(|g| g.0 == r.ip) {
+                        Some(g) if g.2.contains(&i) => {}
+                        Some(g) => g.2.push(i),
+                        None => by.push((r.ip.clone(), r.name.clone(), vec![i])),
+                    }
+                }
             }
         }
         if by.is_empty() {
             return Err("Those accounts are not running on another computer.".into());
         }
         let direct = &direct;
-        let asks = by.into_iter().map(|(ip, name, ids)| async move {
-            let has_token = lock(&self.c.hosts).contains_key(&ip);
+        let asks = by.iter().map(|(ip, name, ids)| async move {
+            // a stale answer is no sign that computer still listens: its reports then
+            let has_token = lock(&self.c.hosts)
+                .get(ip)
+                .is_some_and(|r| r.at.elapsed() < PEER_TTL);
             if has_token {
-                direct(ip, name, ids).await
+                direct(ip.clone(), name.clone(), ids.clone()).await
             } else {
-                self.queued(&ip, &name, ids).await
+                self.queued(ip, name, ids.clone()).await
             }
         });
-        let (mut out, mut why) = (Vec::new(), None);
-        for r in futures_util::future::join_all(asks).await {
-            match r {
-                Ok(v) => out.extend(v.into_iter().filter(|i| ids.contains(i))),
+        let mut why = None;
+        // what each computer let go, in `by`'s order
+        let gone: Vec<Vec<u64>> = futures_util::future::join_all(asks)
+            .await
+            .into_iter()
+            .zip(&by)
+            .map(|(r, g)| match r {
+                Ok(v) => v.into_iter().filter(|i| g.2.contains(i)).collect(),
                 Err(e) => {
                     why.get_or_insert(e);
+                    Vec::new()
+                }
+            })
+            .collect();
+        // Free here only once every computer that ran it let go.
+        let out: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|i| {
+                let mut ran = by
+                    .iter()
+                    .zip(&gone)
+                    .filter(|(g, _)| g.2.contains(i))
+                    .peekable();
+                ran.peek().is_some() && ran.all(|(_, v)| v.contains(i))
+            })
+            .collect();
+        // Gone from where it let go: not offered there again until that computer's next report.
+        for m in [&self.c.hosts, &self.c.peers] {
+            for r in lock(m).values_mut() {
+                for (_, v) in by.iter().zip(&gone).filter(|(g, _)| g.0 == r.ip) {
+                    r.ids.retain(|i| !v.contains(i));
                 }
             }
         }
         if out.is_empty() {
             return Err(why.unwrap_or_else(|| "The other computer could not close them.".into()));
         }
-        // Gone from there now: don't offer Run here again until that computer's next report.
-        for m in [&self.c.hosts, &self.c.peers] {
-            for r in lock(m).values_mut() {
-                r.ids.retain(|i| !out.contains(i));
-            }
-        }
         Ok(out)
     }
 
     /// A hand-over to the paired computer at `ip` (it holds the token): its next report's
     /// answer asks for `ids`; done once a later report no longer lists some of them.
-    /// ponytail: one queued hand-over per computer at a time (a second replaces the first).
+    /// ponytail: one queued entry per computer; a second ask joins the first and shares its
+    /// deadline (an ask too late for it waits in vain and closes nothing).
     async fn queued(&self, ip: &str, name: &str, ids: Vec<u64>) -> Result<Vec<u64>, String> {
         let found = lock(&self.c.peers)
             .iter()
@@ -649,25 +774,262 @@ impl Remote {
             return Err(format!("Update RMI on {name} first."));
         }
         let since = Instant::now();
-        lock(&self.c.wants).insert(id.clone(), (since, ids.clone()));
+        {
+            let mut w = lock(&self.c.wants);
+            let e = w.entry(id.clone()).or_insert((since, Vec::new()));
+            if e.0.elapsed() >= HANDOVER_WAIT / 2 {
+                *e = (since, Vec::new()); // never asked any more: its waiter gives up
+            }
+            let new: Vec<u64> = ids.iter().filter(|i| !e.1.contains(i)).copied().collect();
+            e.1.extend(new);
+        }
         let gone = async {
             loop {
                 // registered before the check: a report landing in between still wakes it
                 let n = self.c.tick.notified();
                 tokio::pin!(n);
                 n.as_mut().enable();
-                let left: Option<Vec<u64>> = lock(&self.c.peers)
-                    .get(&id)
-                    .filter(|r| r.at >= since)
-                    .map(|r| ids.iter().filter(|i| !r.ids.contains(i)).copied().collect());
-                if let Some(g) = left.filter(|g| !g.is_empty()) {
-                    return g;
+                {
+                    // the order the `running` route takes them in
+                    let w = lock(&self.c.wants);
+                    let carried = lock(&self.c.carried).get(&id).copied();
+                    let p = lock(&self.c.peers);
+                    let waiting = w
+                        .get(&id)
+                        .is_some_and(|e| e.1.iter().any(|i| ids.contains(i)));
+                    // only a report after the one that carried the ask shows the closes (the
+                    // carrier may already miss an account that stopped on its own)
+                    if let (false, Some(t), Some(r)) = (waiting, carried, p.get(&id)) {
+                        let g: Vec<u64> =
+                            ids.iter().filter(|i| !r.ids.contains(i)).copied().collect();
+                        if r.at > t && !g.is_empty() {
+                            return g;
+                        }
+                    }
                 }
                 n.await;
             }
         };
         let r = tokio::time::timeout(HANDOVER_WAIT, gone).await;
-        lock(&self.c.wants).remove(&id);
+        {
+            // only its own ids: another ask may still wait in the same entry
+            let mut w = lock(&self.c.wants);
+            if let Some(e) = w.get_mut(&id) {
+                e.1.retain(|i| !ids.contains(i));
+                if e.1.is_empty() {
+                    w.remove(&id);
+                }
+            }
+        }
+        r.map_err(|_| format!("{name} did not answer. Is RMI open there?"))
+    }
+
+    /// Paired computers that take sent accounts, from both directions, within `PEER_TTL`;
+    /// one row per computer.
+    pub fn targets(&self) -> Vec<handover::Target> {
+        let mut out: Vec<handover::Target> = Vec::new();
+        for m in [&self.c.hosts, &self.c.peers] {
+            for r in lock(m).values() {
+                if r.launch && r.at.elapsed() < PEER_TTL && !out.iter().any(|t| t.ip == r.ip) {
+                    out.push(handover::Target {
+                        ip: r.ip.clone(),
+                        device: r.name.clone(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Run on: the paired computer at `ip` launches `ids` first; only the ones it started then
+    /// close here and on any other computer running them (Run here's paths). `ask(ip, name,
+    /// ids)` asks a computer this one holds a token for (the others get it with their next
+    /// report); `pull` is Run here's direct ask. The ids now launching there, and those of
+    /// them still running where they were.
+    pub async fn send<A, AF, P, PF>(
+        &self,
+        ids: &[u64],
+        ip: &str,
+        ask: A,
+        pull: P,
+    ) -> Result<handover::Sent, String>
+    where
+        A: Fn(String, String, Vec<u64>) -> AF,
+        AF: std::future::Future<Output = Result<Vec<u64>, String>>,
+        P: Fn(String, String, Vec<u64>) -> PF,
+        PF: std::future::Future<Output = Result<Vec<u64>, String>>,
+    {
+        if ids.len() > MAX_RUNNING {
+            return Err(too_many());
+        }
+        let Some(t) = self.targets().into_iter().find(|t| t.ip == ip) else {
+            let old = [&self.c.hosts, &self.c.peers].into_iter().find_map(|m| {
+                lock(m)
+                    .values()
+                    .find(|r| r.ip == ip && r.at.elapsed() < PEER_TTL)
+                    .map(|r| r.name.clone())
+            });
+            return Err(old.map_or_else(
+                || "Could not reach that computer.".into(),
+                |n| format!("Update RMI on {n} first."),
+            ));
+        };
+        let name = t.device;
+        // Where else it runs must be able to let go (an RMI before Run here cannot, unless
+        // this one holds its token): sent anyway, it would run in two places.
+        let direct: Vec<String> = lock(&self.c.hosts).keys().cloned().collect();
+        let stuck = |i: &u64| {
+            lock(&self.c.peers)
+                .values()
+                .filter(|r| r.ip != ip && !r.handover && r.at.elapsed() < PEER_TTL)
+                .find(|r| !direct.contains(&r.ip) && r.ids.contains(i))
+                .map(|r| r.name.clone())
+        };
+        let mut old = None;
+        let ids: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|i| stuck(i).map(|n| old.get_or_insert(n)).is_none())
+            .collect();
+        if let (true, Some(n)) = (ids.is_empty(), &old) {
+            return Err(format!("Update RMI on {n} first."));
+        }
+        // a stale or older answer is no sign it listens or takes them: its reports then
+        let has_token = lock(&self.c.hosts)
+            .get(ip)
+            .is_some_and(|r| r.launch && r.at.elapsed() < PEER_TTL);
+        // Kicked here while the target joins: auto-relaunch must not start them again here
+        // (that kicks the target's new session). Held until the answer.
+        let h = ids.clone();
+        let held = on_local(&self.c, move |l| l.hold(&h))
+            .await
+            .unwrap_or_default();
+        let asked = if has_token {
+            ask(ip.into(), name.clone(), ids.to_vec()).await
+        } else {
+            self.queued_launch(ip, &name, ids.to_vec()).await
+        };
+        let started: Vec<u64> = asked
+            .iter()
+            .flatten()
+            .filter(|i| ids.contains(i))
+            .copied()
+            .collect();
+        // given back from what `hold` returned: works while locked too
+        let unhold = |keep: &dyn Fn(u64) -> bool| {
+            let back: Vec<handover::Held> = held.iter().filter(|h| keep(h.0)).cloned().collect();
+            async move {
+                if !back.is_empty() {
+                    on_local(&self.c, move |l| l.unhold(&back)).await;
+                }
+            }
+        };
+        // not moved: watched by auto-relaunch here again
+        unhold(&|i| !started.contains(&i)).await;
+        asked?;
+        if started.is_empty() {
+            return Err(format!(
+                "{name} could not start those accounts. Check they are saved and signed in there."
+            ));
+        }
+        // Already launching there: a close that fails is not an error, the UI is told which
+        // still run where they were (`still`).
+        let s = started.clone();
+        let mut still: Vec<u64> = match on_local(&self.c, move |l| l.release(&s)).await.flatten() {
+            Some(gone) => started
+                .iter()
+                .filter(|i| !gone.contains(i))
+                .copied()
+                .collect(),
+            None => {
+                log::warn!("remote: sent accounts not closed here (locked or starting)");
+                started.clone()
+            }
+        };
+        // still here (a close failed, or an RMI launch of it runs): watched here again
+        unhold(&|i| still.contains(&i)).await;
+        // Launching there now: listed there, they would hide another computer running them
+        // (each account is listed once), which then would never be asked to close them.
+        self.c.forget(ip, &started);
+        let away: Vec<u64> = self
+            .elsewhere()
+            .into_iter()
+            .filter(|e| e.ip != ip && started.contains(&e.user_id))
+            .map(|e| e.user_id)
+            .collect();
+        // ponytail: after the close here; a third computer reachable only through its report
+        // adds up to HANDOVER_WAIT. Run both at once if that wait shows up.
+        if !away.is_empty() {
+            match self.run_here(&away, pull).await {
+                Ok(gone) => still.extend(away.iter().filter(|i| !gone.contains(i))),
+                Err(e) => {
+                    log::warn!("remote: sent accounts still run elsewhere: {e}");
+                    still.extend(&away);
+                }
+            }
+        }
+        // Gone from where they ran: not listed there until that computer's next report.
+        for m in [&self.c.hosts, &self.c.peers] {
+            for r in lock(m).values_mut().filter(|r| r.ip != ip) {
+                r.ids.retain(|i| !started.contains(i) || still.contains(i));
+            }
+            // On the target at once: "Run on" it again would launch it twice there.
+            for r in lock(m).values_mut().filter(|r| r.ip == ip) {
+                let new: Vec<u64> = started
+                    .iter()
+                    .filter(|i| !r.ids.contains(i))
+                    .copied()
+                    .collect();
+                r.ids.extend(new);
+            }
+        }
+        Ok(handover::Sent {
+            started,
+            still,
+            old,
+        })
+    }
+
+    /// A send to the paired computer at `ip` (it holds the token): its next report's answer
+    /// asks it to launch `ids`; done when a later report says which started (`launched`).
+    /// ponytail: one queued send per computer at a time (a second is refused while the first
+    /// waits); queue them per send if that gets in the way.
+    async fn queued_launch(&self, ip: &str, name: &str, ids: Vec<u64>) -> Result<Vec<u64>, String> {
+        let id = lock(&self.c.peers)
+            .iter()
+            .find(|(_, r)| r.ip == ip)
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| format!("Could not reach {name}."))?;
+        {
+            // checked and taken under one lock: two sends must never share the slot
+            let mut acks = lock(&self.c.acks);
+            if acks.contains_key(&id) {
+                return Err(format!(
+                    "{name} is still taking the last accounts. Try again in a moment."
+                ));
+            }
+            // its own operation id: a late answer to an earlier send must not settle this one
+            let op = rand::random();
+            acks.insert(id.clone(), Ack { op, launched: None });
+        }
+        lock(&self.c.launches).insert(id.clone(), (Instant::now(), ids));
+        let ack = async {
+            loop {
+                // registered before the check: an ack landing in between still wakes it
+                let n = self.c.tick.notified();
+                tokio::pin!(n);
+                n.as_mut().enable();
+                let got = lock(&self.c.acks).get(&id).and_then(|s| s.launched.clone());
+                if let Some(v) = got {
+                    return v;
+                }
+                n.await;
+            }
+        };
+        let r = tokio::time::timeout(HANDOVER_WAIT, ack).await;
+        // the slot last: a next send is refused until it goes, so this never removes its launch
+        lock(&self.c.launches).remove(&id);
+        lock(&self.c.acks).remove(&id);
         r.map_err(|_| format!("{name} did not answer. Is RMI open there?"))
     }
 
@@ -676,11 +1038,13 @@ impl Remote {
     }
 
     pub fn status(&self) -> RemoteStatus {
+        // before the store: a session claiming the slot takes `live`, then `store`
+        let session = self.live();
         let st = lock(&self.c.store);
         RemoteStatus {
             listening: lock(&self.c.bound).map(|a| a.to_string()),
             name: self.c.name(),
-            session: self.live(),
+            session,
             paired: st
                 .paired
                 .iter()
@@ -722,16 +1086,28 @@ impl Remote {
     }
 
     /// Forget a paired device; its live session ends.
-    pub fn unpair(&self, id: &str) {
-        {
+    pub async fn unpair(&self, id: &str) {
+        let snap = {
             let mut st = lock(&self.c.store);
             st.paired.retain(|p| p.hash[..12] != *id);
-            let _ = self.c.save(&st); // logged
-        }
+            self.c.snap(&st)
+        };
+        // what it reported and anything still asked of it: gone at once, not after PEER_TTL
+        lock(&self.c.peers).remove(id);
+        lock(&self.c.wants).remove(id);
+        lock(&self.c.carried).remove(id);
+        lock(&self.c.launches).remove(id);
+        self.c.tick.notify_waiters();
         if lock(&self.c.live).as_ref().is_some_and(|l| l.id == id) {
             self.c.kick("removed");
         }
         self.c.changed();
+        let _ = save(&self.c, snap).await; // logged
+    }
+
+    /// This computer forgot its token for `ip`: what that computer answered goes too.
+    pub fn forget_host(&self, ip: &str) {
+        lock(&self.c.hosts).remove(ip);
     }
 
     /// Stop button (indicator, Settings): ends the live session; new ones are refused for
@@ -889,6 +1265,7 @@ fn router(c: Ctx) -> Router {
         .route("/v1/remote/pair", post(pair))
         .route("/v1/remote/running", post(running))
         .route("/v1/remote/handover", post(handover))
+        .route("/v1/remote/launch", post(launch))
         .route("/v1/remote/ws", get(ws))
         .fallback(|| async { ApiError::not_found("No such endpoint") })
         .layer(DefaultBodyLimit::max(MAX_TEXT))
@@ -934,6 +1311,13 @@ struct RunningBody {
     /// It takes hand-overs (an older RMI leaves this out).
     #[serde(default)]
     can_hand_over: bool,
+    /// It takes sent accounts (Run on; 1.0.3 leaves this out).
+    #[serde(default)]
+    can_launch: bool,
+    /// The ids it started for a queued send, sent right after acting on it.
+    launched: Option<Vec<u64>>,
+    /// The send `launched` answers (its answer's `launchOp`).
+    launched_op: Option<u64>,
 }
 
 /// The paired device's (name, id) calling with its Bearer token from the IP it paired from,
@@ -975,29 +1359,72 @@ async fn running(
     let b = b
         .map_err(|_| ApiError::new(400, "bad_request", "Bad request"))?
         .0;
-    if b.user_ids.len() > MAX_RUNNING {
+    if b.user_ids.len() > MAX_RUNNING || b.launched.as_ref().is_some_and(|l| l.len() > MAX_RUNNING)
+    {
         return Err(ApiError::new(400, "bad_request", "Too many accounts"));
+    }
+    // only into the slot of the send it answers (a late answer to one that gave up is not the
+    // next one's: those accounts run in both places, and both computers' reports show it).
+    // That computer repeats its answer in its next reports (one may get lost on the way).
+    if let Some(l) = b.launched {
+        match lock(&c.acks).get_mut(&id) {
+            Some(s) if Some(s.op) == b.launched_op => s.launched = Some(l),
+            _ if !l.is_empty() => {
+                log::info!("remote: a launch answer for a send no longer waiting: {l:?}")
+            }
+            _ => {}
+        }
     }
     // The name that computer gives itself, else the one it paired under.
     let name = Some(clean_name(&b.name))
         .filter(|n| !n.is_empty())
         .unwrap_or(paired_name);
+    // locked or still starting: no target for sent accounts, and no ask goes out (a lock here
+    // wins over a Run here / Run on waiting for that computer)
+    let me = on_local(&c, |l| l.running().map(|ids| (ids, l.can_launch())))
+        .await
+        .flatten();
+    let unlocked = me.is_some();
+    let (ids, can) = me.unwrap_or_default();
+    let mut v = json!({ "name": c.name(), "canLaunch": can });
+    // locked or the process list unknown: no `userIds` (not "nothing runs here"); that
+    // computer keeps its last answer until it ages out, as with an older RMI
+    if unlocked {
+        v["userIds"] = json!(ids);
+    }
     let r = Report {
         at: Instant::now(),
         name,
         ids: b.user_ids,
         ip: from.ip().to_string(),
         handover: b.can_hand_over,
+        launch: b.can_launch,
     };
-    lock(&c.peers).insert(id.clone(), r);
-    c.tick.notify_waiters();
-    let ids = on_local(&c, |l| l.running()).await.flatten();
-    let mut v = json!({ "name": c.name(), "userIds": ids.unwrap_or_default() });
-    // asked once: the next report shows whether they closed
-    let want = lock(&c.wants).remove(&id);
-    if let Some((_, ids)) = want.filter(|(at, _)| at.elapsed() < HANDOVER_WAIT) {
-        v["handover"] = json!(ids);
+    {
+        // the asks are taken as this report is stored: a queued hand-over then knows the
+        // report that carried its ask, and waits for a later one
+        let mut wants = lock(&c.wants);
+        let mut launches = lock(&c.launches);
+        if unlocked {
+            // asked once: the next report shows whether they closed. Only in the first half
+            // of the wait: closed later, the asking side may have given up (runs nowhere).
+            let want = wants.remove(&id);
+            if let Some((_, ids)) = want.filter(|(at, _)| at.elapsed() < HANDOVER_WAIT / 2) {
+                v["handover"] = json!(ids);
+                lock(&c.carried).insert(id.clone(), r.at);
+            }
+            // asked once: the next report says which started. Only in the first half of the
+            // wait: asked later, it could launch there after the send gave up (runs in both).
+            let go = launches.remove(&id);
+            if let Some((_, ids)) = go.filter(|(at, _)| at.elapsed() < HANDOVER_WAIT / 2) {
+                v["launch"] = json!(ids);
+                // the slot outlives its launch entry (taken first, dropped last)
+                v["launchOp"] = json!(lock(&c.acks).get(&id).map(|s| s.op));
+            }
+        }
+        lock(&c.peers).insert(id.clone(), r);
     }
+    c.tick.notify_waiters();
     Ok(Json(v).into_response())
 }
 
@@ -1029,6 +1456,30 @@ async fn handover(
     Ok(Json(json!({ "released": released })).into_response())
 }
 
+/// Run on from a paired computer: start launching these accounts here, like Play. Answers
+/// with the ids whose launch started (only those close over there).
+async fn launch(
+    State(c): State<Ctx>,
+    ConnectInfo(from): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    b: Result<Json<HandoverBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    paired_caller(&c, &headers, from)?;
+    let b = b
+        .map_err(|_| ApiError::new(400, "bad_request", "Bad request"))?
+        .0;
+    if b.user_ids.len() > MAX_RUNNING {
+        return Err(ApiError::new(400, "bad_request", "Too many accounts"));
+    }
+    let started = on_local(&c, move |l| l.launch(&b.user_ids))
+        .await
+        .ok_or_else(|| ApiError::new(503, "unavailable", "RMI is still starting."))?
+        .ok_or_else(|| ApiError::new(409, "locked", "RMI is locked on this computer."))?;
+    // runs here now: not offered as running there until its next report
+    c.forget(&from.ip().to_string(), &started);
+    Ok(Json(json!({ "started": started })).into_response())
+}
+
 #[derive(Deserialize)]
 struct PairBody {
     code: String,
@@ -1056,7 +1507,7 @@ async fn pair(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "Device".into());
     let ip = from.ip().to_string();
-    let gone = {
+    let (gone, before, snap) = {
         let mut st = lock(&c.store);
         let before = st.paired.clone();
         // pairing again from the same device replaces its old entry (that token is dead);
@@ -1076,16 +1527,18 @@ async fn pair(
             paired_at: now_iso(),
             ip,
         });
-        if c.save(&st).is_err() {
-            st.paired = before;
-            return Err(ApiError::new(
-                500,
-                "save_failed",
-                "That computer could not save the pairing. Try again.",
-            ));
-        }
-        (same, evicted)
+        let snap = c.snap(&st);
+        ((same, evicted), before, snap)
     };
+    // written off the store lock (fsync): reports and sessions do not wait for the disk
+    if save(&c, snap).await.is_err() {
+        lock(&c.store).paired = before;
+        return Err(ApiError::new(
+            500,
+            "save_failed",
+            "That computer could not save the pairing. Try again.",
+        ));
+    }
     let live = lock(&c.live).as_ref().map(|l| l.id.clone());
     if let Some(id) = live {
         // the same device's stale session: replaced, its new token stays; evicted: removed
@@ -1186,6 +1639,9 @@ async fn session(
                 None if lock(&c.stopped_at).is_some_and(|t| t.elapsed() < STOP_HOLD) => {
                     Err("stopped")
                 }
+                // removed while waiting for its stale session to let go (`unpair` drops the
+                // pairing before it looks at this slot)
+                None if !lock(&c.store).paired.iter().any(|p| p.hash[..12] == id) => Err("removed"),
                 None => {
                     *live = Some(Live {
                         peer: peer.clone(),
@@ -1213,7 +1669,7 @@ async fn session(
     c.changed();
     let (started_at, t0) = (now_iso(), Instant::now());
     let end = run(&c, ws, rx).await;
-    {
+    let snap = {
         let mut st = lock(&c.store);
         st.log.push(LogEntry {
             peer,
@@ -1224,10 +1680,11 @@ async fn session(
         });
         let n = st.log.len();
         st.log.drain(..n.saturating_sub(LOG_MAX));
-        let _ = c.save(&st); // logged
-    }
-    // input is released already; free the slot (stop first: a waiting replacement then
-    // finds both empty) before the goodbye
+        c.snap(&st)
+    };
+    let _ = save(&c, snap).await; // logged
+                                  // input is released already; free the slot (stop first: a waiting replacement then
+                                  // finds both empty) before the goodbye
     *lock(&c.stop) = None;
     *lock(&c.live) = None;
     log::info!("remote: session ended");
@@ -1613,7 +2070,18 @@ impl Held {
                     i.key(&code, false);
                 }
             }
-            Ev::Text(s) => i.text(&s),
+            // the viewer's line ends: each `\n` is an Enter press, not a typed line feed
+            Ev::Text(s) => {
+                for (n, part) in s.split('\n').enumerate() {
+                    if n > 0 {
+                        i.key("Enter", true);
+                        i.key("Enter", false);
+                    }
+                    if !part.is_empty() {
+                        i.text(part);
+                    }
+                }
+            }
             Ev::Lock => i.lock(),
         }
     }
@@ -2155,7 +2623,11 @@ async fn run(c: &Ctx, ws: WebSocket, mut stop: oneshot::Receiver<&'static str>) 
     // `all` always (every platform here can compose it): monitors come and go mid-session,
     // and the viewer offers All screens only with 2 or more
     let mut caps = vec!["screens", "cursor", "stats", "takeover", "media", "all"];
-    if h264::available() {
+    // the first call probes the encoders (driver DLLs): off the async threads
+    if tokio::task::spawn_blocking(h264::available)
+        .await
+        .unwrap_or(false)
+    {
         caps.push("h264");
     }
     if c.files_on() {
@@ -2491,7 +2963,7 @@ pub fn remote_pair_code(state: tauri::State<'_, AppState>) -> Result<PairCode, S
 /// Windows.
 #[tauri::command]
 pub async fn remote_unpair(app: tauri::AppHandle, id: String) {
-    app.state::<AppState>().remote.unpair(&id);
+    app.state::<AppState>().remote.unpair(&id).await;
 }
 
 #[tauri::command]

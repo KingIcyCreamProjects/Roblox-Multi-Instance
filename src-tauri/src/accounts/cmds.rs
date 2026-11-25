@@ -140,6 +140,25 @@ fn apply_batch(
     Ok(out)
 }
 
+/// Bulk add input checks before any Roblox request: the vault must be open (never send
+/// cookies only to fail at the save), and a paste is capped (one sequential, rate-limited
+/// Roblox call per line, with no cancel).
+fn bulk_ok(st: &AppState, text: &str) -> CmdResult<()> {
+    if guard(&st.vault).is_none() {
+        return Err(LOCKED.into());
+    }
+    if text.len() > BULK_MAX_BYTES
+        || text.lines().filter(|l| !l.trim().is_empty()).count() > BULK_MAX_LINES
+    {
+        return Err(BULK_TOO_LARGE.into());
+    }
+    Ok(())
+}
+/// Coded: the catalog text (`BULK_TOO_LARGE` in src/lib/ipc.ts) states the limit.
+const BULK_TOO_LARGE: &str = "BULK_TOO_LARGE";
+const BULK_MAX_LINES: usize = 200;
+const BULK_MAX_BYTES: usize = 1 << 20;
+
 #[tauri::command]
 pub async fn accounts_add_cookies(
     app: AppHandle,
@@ -148,6 +167,7 @@ pub async fn accounts_add_cookies(
 ) -> CmdResult<Vec<AddResult>> {
     let text = Zeroizing::new(text);
     let start = gen(&state);
+    bulk_ok(&state, &text)?;
     let (mut out, mut valid) = (Vec::new(), Vec::new());
     for (i, raw) in text.lines().enumerate() {
         let line = i + 1;
@@ -191,6 +211,7 @@ pub async fn accounts_add_pending(
 ) -> CmdResult<Vec<AddResult>> {
     let text = Zeroizing::new(text);
     let start = gen(&state);
+    bulk_ok(&state, &text)?;
     let (mut out, mut ok) = (Vec::new(), Vec::new());
     for (i, raw) in text.lines().enumerate() {
         if raw.trim().is_empty() {
@@ -605,7 +626,11 @@ pub async fn reauth(
     if keys(&state.vault)?.mode() == Mode::Os {
         os_confirm(&app, false).await?;
     } else {
-        require_password(&state.vault, password.as_deref().map(|s| s.as_str()))?;
+        // Argon2 off the async workers
+        crate::commands::blocking(&app, move |s| {
+            require_password(&s.vault, password.as_deref().map(|s| s.as_str()))
+        })
+        .await?;
     }
     state
         .accounts

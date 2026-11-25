@@ -392,7 +392,7 @@ impl Desk for System {
         let e = enigo::Enigo::new(&enigo::Settings::default())
             .map_err(|e| log::warn!("remote: input not allowed yet: {e}"))
             .ok();
-        Box::new(mac::Mac(e))
+        Box::new(mac::Mac(e, [0; 2]))
     }
 }
 
@@ -400,8 +400,9 @@ impl Desk for System {
 mod mac {
     use enigo::{Axis, Button, Coordinate, Direction, Key, Keyboard, Mouse};
 
-    /// `None` until Accessibility is granted; retried on the next event.
-    pub struct Mac(pub Option<enigo::Enigo>);
+    /// `None` until Accessibility is granted; retried on the next event. Then the wheel
+    /// deltas (y, x) not yet a whole notch.
+    pub struct Mac(pub Option<enigo::Enigo>, pub [i32; 2]);
 
     impl Mac {
         fn get(&mut self) -> Option<&mut enigo::Enigo> {
@@ -485,13 +486,19 @@ mod mac {
             }
         }
         fn wheel(&mut self, dx: i32, dy: i32) {
-            let notches = |d: i32| (d.abs() / 120).max(1) * d.signum();
-            let Some(e) = self.get() else { return };
-            if dy != 0 {
-                let _ = e.scroll(notches(dy), Axis::Vertical);
+            // small deltas (a trackpad, every frame) add up to whole notches, not one each
+            let mut notches = [0; 2];
+            for (i, d) in [dy, dx].into_iter().enumerate() {
+                let r = self.1[i].saturating_add(d);
+                notches[i] = r / 120;
+                self.1[i] = r % 120;
             }
-            if dx != 0 {
-                let _ = e.scroll(notches(dx), Axis::Horizontal);
+            let Some(e) = self.get() else { return };
+            if notches[0] != 0 {
+                let _ = e.scroll(notches[0], Axis::Vertical);
+            }
+            if notches[1] != 0 {
+                let _ = e.scroll(notches[1], Axis::Horizontal);
             }
         }
         fn key(&mut self, code: &str, down: bool) {

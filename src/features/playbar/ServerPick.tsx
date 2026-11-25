@@ -1,4 +1,5 @@
 import * as Toggle from "@radix-ui/react-toggle-group";
+import * as Tooltip from "@radix-ui/react-tooltip";
 import type { LaunchMode } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
 
@@ -33,14 +34,25 @@ export function ServerPick({
         className="flex h-8 items-center self-start rounded-control bg-surface-3 p-0.5"
       >
         {SERVER_MODES.map((m) => (
-          <Toggle.Item
-            key={m.v}
-            value={m.v}
-            title={t(m.tip)}
-            className="h-7 rounded-[calc(var(--radius-control)-2px)] px-2.5 text-12 font-medium text-text-2 transition-colors duration-[var(--dur-quick)] hover:text-text-1 data-[state=on]:bg-surface-4 data-[state=on]:text-text-1"
-          >
-            {t(m.label)}
-          </Toggle.Item>
+          // the app's styled tooltip (as IconButton), not a bare title
+          <Tooltip.Root key={m.v}>
+            <Tooltip.Trigger asChild>
+              <Toggle.Item
+                value={m.v}
+                className="h-7 rounded-[calc(var(--radius-control)-2px)] px-2.5 text-12 font-medium text-text-2 transition-colors duration-[var(--dur-quick)] hover:text-text-1 data-[state=on]:bg-surface-4 data-[state=on]:text-text-1"
+              >
+                {t(m.label)}
+              </Toggle.Item>
+            </Tooltip.Trigger>
+            <Tooltip.Portal>
+              <Tooltip.Content
+                sideOffset={6}
+                className="glass z-50 max-w-64 rounded-chip px-2 py-1 text-12 text-text-1"
+              >
+                {t(m.tip)}
+              </Tooltip.Content>
+            </Tooltip.Portal>
+          </Tooltip.Root>
         ))}
       </Toggle.Root>
       {mode === "specific" && (

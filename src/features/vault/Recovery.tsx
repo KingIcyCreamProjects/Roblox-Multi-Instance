@@ -2,8 +2,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { call, hasCode } from "@/lib/ipc";
-import { t } from "@/lib/i18n";
-import { reportError } from "@/lib/report";
+import { LOCALE, t } from "@/lib/i18n";
+import { logError } from "@/lib/report";
 import { PasswordField } from "./PasswordField";
 import { vaultError } from "./useVault";
 
@@ -15,7 +15,8 @@ export function Recovery({ onRestored }: { onRestored?: () => void } = {}) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [pw, setPw] = useState("");
-  const [pending, setPending] = useState(false);
+  /** name of the backup being restored */
+  const [pending, setPending] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [wrongPw, setWrongPw] = useState(false);
   const { data: backups, isError } = useQuery({
@@ -25,7 +26,7 @@ export function Recovery({ onRestored }: { onRestored?: () => void } = {}) {
   });
 
   const restore = async (name: string) => {
-    setPending(true);
+    setPending(name);
     setErr(null);
     setWrongPw(false);
     try {
@@ -38,12 +39,17 @@ export function Recovery({ onRestored }: { onRestored?: () => void } = {}) {
       setErr(vaultError(e));
       setWrongPw(hasCode(e, "WRONG_PASSWORD"));
     } finally {
-      setPending(false);
+      setPending(null);
     }
   };
 
+  // shown here: the locked screen has no error banner (reportError would surface after unlock)
   const openFolder = () =>
-    call("open_folder", { kind: "backups" }).catch((e: unknown) => reportError(e));
+    call("open_folder", { kind: "backups" }).catch((e: unknown) => {
+      logError(`open_folder failed: ${String(e)}`);
+      setErr(vaultError(e));
+      setWrongPw(false);
+    });
 
   return (
     <section aria-label={t("vault.damaged.restore")} className="flex flex-col gap-4">
@@ -53,6 +59,11 @@ export function Recovery({ onRestored }: { onRestored?: () => void } = {}) {
         </Button>
         <Button onClick={() => void openFolder()}>{t("vault.damaged.openFolder")}</Button>
       </div>
+      {err && !wrongPw && (
+        <p role="alert" className="text-13 text-error">
+          {err}
+        </p>
+      )}
       {open && (
         <div className="flex flex-col gap-3">
           <PasswordField
@@ -60,15 +71,16 @@ export function Recovery({ onRestored }: { onRestored?: () => void } = {}) {
             label={t("vault.damaged.pw")}
             autoComplete="current-password"
             value={pw}
-            onChange={(e) => setPw(e.target.value)}
+            onChange={(e) => {
+              setPw(e.target.value);
+              if (wrongPw) {
+                setErr(null);
+                setWrongPw(false);
+              }
+            }}
             error={wrongPw ? err : null}
-            disabled={pending}
+            disabled={!!pending}
           />
-          {err && !wrongPw && (
-            <p role="alert" className="text-13 text-error">
-              {err}
-            </p>
-          )}
           {isError && (
             <p role="alert" className="text-13 text-error">
               {t("vs.backups.err")}
@@ -79,15 +91,15 @@ export function Recovery({ onRestored }: { onRestored?: () => void } = {}) {
             {backups?.map((b) => (
               <li key={b.name} className="flex items-center gap-3">
                 <span className="text-13 text-text-2 tabular-nums">
-                  {new Date(b.createdAt).toLocaleString()}
+                  {new Date(b.createdAt).toLocaleString(LOCALE)}
                 </span>
                 <Button
                   className="ml-auto"
-                  disabled={pending}
-                  aria-label={`${t("vault.damaged.pick")} ${b.name}`}
+                  disabled={!!pending}
+                  aria-label={t("vault.damaged.pickOf", { name: b.name })}
                   onClick={() => void restore(b.name)}
                 >
-                  {pending ? t("vs.working") : t("vault.damaged.pick")}
+                  {pending === b.name ? t("vs.working") : t("vault.damaged.pick")}
                 </Button>
               </li>
             ))}

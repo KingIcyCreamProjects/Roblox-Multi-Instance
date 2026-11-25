@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSettings } from "@/app/useSettings";
 import { call } from "@/lib/ipc";
-import { t, type MsgKey } from "@/lib/i18n";
+import { LOCALE, t, type MsgKey } from "@/lib/i18n";
 import { SubHeading } from "./controls";
 
 const time = (secs: number | null) =>
-  secs === null ? "-" : new Date(secs * 1000).toLocaleTimeString();
+  secs === null ? "-" : new Date(secs * 1000).toLocaleTimeString(LOCALE);
 
 /** Live clients and rule state from `watcher_status`, refreshed every scan interval. */
 export function WatcherPanel() {
@@ -40,12 +40,12 @@ export function WatcherPanel() {
                 <td className="py-1" data-pii>
                   {c.gameClient ? (c.username ?? t("watcher.unknown")) : t("watcher.notGame")}
                 </td>
-                <td className="py-1 font-mono">{c.pid}</td>
-                <td className="py-1">{t("vs.mb", { n: c.memoryMb })}</td>
+                <td className="py-1 font-mono tabular-nums">{c.pid}</td>
+                <td className="py-1 tabular-nums">{t("vs.mb", { n: c.memoryMb })}</td>
                 <td className="py-1" data-pii>
                   {c.title ?? "-"}
                 </td>
-                <td className="py-1">{time(c.lastServerEvent)}</td>
+                <td className="py-1 tabular-nums">{time(c.lastServerEvent)}</td>
               </tr>
             ))}
           </tbody>
@@ -61,7 +61,7 @@ export function WatcherPanel() {
                   {r.enabled ? t("watcher.ruleOn") : t("watcher.ruleOff")}
                 </span>
               </span>
-              <span className="text-text-2">
+              <span className="text-text-2 tabular-nums">
                 {r.lastFiredAt === null
                   ? t("watcher.never")
                   : t("watcher.fired", { t: time(r.lastFiredAt) })}

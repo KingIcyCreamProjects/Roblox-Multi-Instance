@@ -19,12 +19,19 @@ use zeroize::Zeroizing;
 /// The host is set once the Tauri app exists (`set_host` in setup).
 pub struct AppBackend<H: Host> {
     host: OnceLock<H>,
+    /// Launch batches started through the API (ids); finished ones are pruned on each launch.
+    launches: std::sync::Mutex<Vec<String>>,
 }
+
+/// Most API launch batches queued or running at once; more get 429 (batches run one at a
+/// time, and the launcher keeps status for 200).
+const LAUNCHES_MAX: usize = 50;
 
 impl<H: Host> Default for AppBackend<H> {
     fn default() -> Self {
         Self {
             host: OnceLock::new(),
+            launches: Default::default(),
         }
     }
 }
@@ -46,8 +53,13 @@ fn locked() -> ApiError {
 
 /// Map an IPC error string to an API error.
 fn cmd_err(e: String) -> ApiError {
+    use crate::launch::launcher::{FRIEND_PAUSED, HANDED_OVER};
     if e == LOCKED || e == WAS_LOCKED {
         locked()
+    } else if e == FRIEND_PAUSED {
+        ApiError::new(409, "friend_paused", e)
+    } else if e == HANDED_OVER {
+        ApiError::new(409, "handed_over", e)
     } else {
         ApiError::new(400, "bad_request", e)
     }
@@ -157,7 +169,23 @@ impl<H: Host> Backend for AppBackend<H> {
         if !given && req.job_id.as_deref().is_some_and(|j| !j.trim().is_empty()) {
             return Err(ApiError::new(400, "bad_request", "jobId needs placeId"));
         }
-        start_batch(h, vec![id], bar, given, false).map_err(cmd_err)
+        // One lock across count and start: parallel requests cannot pass the cap together.
+        let mut q = self
+            .launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Unfinished batches stay in the launcher's status; done (or gone) ones are pruned.
+        q.retain(|b| batch_status(b).is_some_and(|v| v["done"] != true));
+        if q.len() >= LAUNCHES_MAX {
+            return Err(ApiError::new(
+                429,
+                "too_many_launches",
+                "Too many launches waiting. Try again when some have finished.",
+            ));
+        }
+        let b = start_batch(h, vec![id], bar, given, false).map_err(cmd_err)?;
+        q.push(b.clone());
+        Ok(b)
     }
 
     async fn launch_status(&self, id: &str) -> ApiResult<Value> {
@@ -305,7 +333,10 @@ impl<H: Host> Backend for AppBackend<H> {
             let peers = st.remote.running_elsewhere();
             // One process scan for all accounts (polled every few seconds per viewer).
             let trackers: Vec<String> = accs.iter().map(|a| a.3.clone()).collect();
-            let live = st.platform.tracked_clients(&trackers);
+            // Unreadable: an error, not "nothing runs" (that would offer a second launch).
+            let live = st.platform.tracked_clients(&trackers).ok_or_else(|| {
+                ApiError::new(503, "busy", "Could not read the running clients; try again")
+            })?;
             Ok(accs
                 .into_iter()
                 .map(|(id, display_name, username, tracker, paused, uid)| {
@@ -847,6 +878,23 @@ pub(crate) mod tests {
             (e.status, e.code, e.message.as_str()),
             (400, "bad_request", "nope")
         );
+        use crate::launch::launcher::{FRIEND_PAUSED, HANDED_OVER};
+        assert_eq!(cmd_err(FRIEND_PAUSED.into()).code, "friend_paused");
+        let e = cmd_err(HANDED_OVER.into());
+        assert_eq!((e.status, e.code), (409, "handed_over"));
+    }
+
+    #[tokio::test]
+    async fn handed_over_launch_and_locked_cookie_are_conflicts_not_400() {
+        let d = tempfile::tempdir().unwrap();
+        let h = host(d.path());
+        let b = be(&h);
+        h.0.automation.hand_over(&["A".into()]);
+        let e = b.launch("alice", LaunchReq::default()).await.unwrap_err();
+        assert_eq!((e.status, e.code), (409, "handed_over"));
+        assert!(!h.0.automation.own_running("A"));
+        *h.0.vault.lock().unwrap() = None;
+        assert_eq!(b.cookie("alice").await.unwrap_err().status, 423);
     }
 
     #[test]
@@ -902,12 +950,8 @@ pub(crate) mod tests {
             fn open_uri(&self, _: &str) -> std::io::Result<()> {
                 Ok(())
             }
-            fn tracked_pids(&self, t: &str) -> Vec<u32> {
-                if t == "100000" {
-                    vec![1]
-                } else {
-                    vec![]
-                }
+            fn tracked_pids(&self, t: &str) -> Option<Vec<u32>> {
+                Some(if t == "100000" { vec![1] } else { vec![] })
             }
         }
         let d = tempfile::tempdir().unwrap();

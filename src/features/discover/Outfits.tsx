@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { ExternalLink, Search, X } from "lucide-react";
 import { useState } from "react";
@@ -12,17 +12,7 @@ import { label } from "@/features/accounts/model";
 import { errText, useAccounts } from "@/features/accounts/useAccounts";
 import { call, type MissingAsset, type Outfit } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
-import {
-  ErrorLine,
-  inputCls,
-  Kv,
-  PanelEmpty,
-  PanelTitle,
-  pickedCls,
-  Quiet,
-  Split,
-  Thumb,
-} from "./shared";
+import { ErrorLine, inputCls, Kv, PanelTitle, pickedCls, Quiet, Split, Thumb } from "./shared";
 
 /** `embedded`: inside the Tools sheet (no outer padding), starts on `defaultUser`. */
 export function Outfits({
@@ -41,6 +31,7 @@ export function Outfits({
     staleTime: 5 * 60_000,
     meta: { silent: true },
   });
+  const qc = useQueryClient();
   const { data: list } = useAccounts();
   const selId = useUi((u) => u.sel.ids[0]);
   const acc = list?.accounts.find((a) => a.id === selId);
@@ -61,6 +52,8 @@ export function Outfits({
     setMissing(null);
     try {
       const r = await call("outfit_wear", { outfitId: o.id, accountId: acc.id });
+      // the inspector's full avatar follows the outfit (the row headshot waits for Rust's sync)
+      void qc.invalidateQueries({ queryKey: ["avatar_full", acc.userId] });
       if (r.missing.length) setMissing({ accountId: acc.id, outfit: o.name, items: r.missing });
       else
         toast(
@@ -221,7 +214,10 @@ export function Outfits({
               src={cur.thumbnail}
               className="aspect-square w-56 max-h-56 shrink-0 self-center rounded-panel"
             />
-            <PanelTitle title={cur.name} sub={t("outfits.title", { name: user })} />
+            <PanelTitle
+              title={cur.name}
+              sub={<span data-pii>{t("outfits.title", { name: user })}</span>}
+            />
             {acc ? (
               <Kv rows={[[t("outfits.wearOn"), <span data-pii>{label(acc)}</span>]]} />
             ) : (
@@ -230,9 +226,8 @@ export function Outfits({
             <div className="flex">{wearBtn(cur)}</div>
             {warn}
           </>
-        ) : (
-          <PanelEmpty>{t("discover.pick")}</PanelEmpty>
-        )
+        ) : // nothing to pick before a lookup or with no outfits (the first one is shown otherwise)
+        null
       }
     />
   );

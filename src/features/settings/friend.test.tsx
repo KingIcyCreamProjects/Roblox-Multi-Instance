@@ -117,6 +117,58 @@ test("turn off friend link removes the Funnel entry, then clears the address", a
   calls.mockRestore();
 });
 
+test("turn off friend link drops drafted friend edits; a refusal is shown once", async () => {
+  const user = userEvent.setup();
+  await mockCall("settings_set", {
+    patch: { friend: { publicUrl: "https://rmi.example.ts.net:8443", enabled: true } },
+  });
+  useDraft.getState().setAll({ "friend.enabled": true, "tray.enabled": false });
+  wrap(<FriendExtras />);
+  await user.click(await screen.findByRole("button", { name: t("friend.tsOff") }));
+  // a later Save must not turn it back on; unrelated edits stay
+  await waitFor(() => expect(useDraft.getState().edits).toEqual({ "tray.enabled": false }));
+  useDraft.getState().clear();
+});
+
+test("a failed new password says why and keeps the old one", async () => {
+  const user = userEvent.setup();
+  const orig = ipc.call;
+  const spy = vi
+    .spyOn(ipc, "call")
+    .mockImplementation((cmd, args) =>
+      cmd === "friend_new_password"
+        ? Promise.reject(new Error("Could not save."))
+        : orig(cmd, args as never),
+    );
+  try {
+    wrap(<FriendExtras />);
+    await user.click(screen.getByRole("button", { name: t("friend.newPw") }));
+    await user.click(screen.getByRole("button", { name: t("friend.newPw") }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save.");
+    expect(screen.queryByText(t("friend.pwNew"))).toBeNull();
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test("a saved address Rust can't use says why instead of '…'", async () => {
+  await mockCall("settings_set", { patch: { friend: { publicUrl: "http://plain.example" } } });
+  const orig = ipc.call;
+  const spy = vi
+    .spyOn(ipc, "call")
+    .mockImplementation((cmd, args) =>
+      cmd === "friend_link"
+        ? Promise.reject(new Error("Public address must start with https://"))
+        : orig(cmd, args as never),
+    );
+  try {
+    wrap(<FriendExtras />);
+    expect(await screen.findByText("Public address must start with https://")).toBeInTheDocument();
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 test("own public address: no turn off friend link button", async () => {
   await mockCall("settings_set", {
     patch: { friend: { publicUrl: "https://friend.example.com" } },

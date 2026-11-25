@@ -3,7 +3,6 @@ import clsx from "clsx";
 import {
   ChevronDown,
   Copy,
-  Download,
   FolderInput,
   Globe,
   LayoutGrid,
@@ -21,6 +20,7 @@ import { useUi } from "@/app/store";
 import { TabOrder } from "@/app/Tabs";
 import { useSettings, useSetSettings } from "@/app/useSettings";
 import { Button } from "@/components/ui/Button";
+import { SCRIM } from "@/components/ui/Sheet";
 import { call, errMessage, type Capabilities, type Settings } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
 import { Toggle } from "@/features/settings/controls";
@@ -77,7 +77,7 @@ const rowCls =
 function Item({ icon, title, body }: { icon: ReactNode; title: string; body: string }) {
   return (
     <div className={clsx(rowCls, "py-3.5")}>
-      <span className={clsx(tile, "size-[38px]")}>{icon}</span>
+      <span className={clsx(tile, "size-9.5")}>{icon}</span>
       <div>
         <b className="block text-14 font-semibold text-text-1">{title}</b>
         <span className="block text-13 text-text-3">{body}</span>
@@ -151,8 +151,10 @@ function Defender({ dir }: { dir: string }) {
           <ShieldCheck size={16} strokeWidth={1.75} aria-hidden />
           {t("tour.def.add")}
         </Button>
+        {/* the install path holds the Windows user folder name: privacy mode blurs it */}
         <p
           role="status"
+          data-pii={dir && (def.state === "idle" || def.state === "err") ? "" : undefined}
           className={clsx("text-13", def.state === "ok" ? "text-online" : "text-text-3")}
         >
           {def.state === "pending"
@@ -181,7 +183,10 @@ function Defender({ dir }: { dir: string }) {
         )}
         {dir && open && (
           <div className="flex items-start gap-2 rounded-control bg-surface-1 p-3">
-            <pre className="min-w-0 flex-1 font-mono text-12 break-all whitespace-pre-wrap text-text-1 select-text">
+            <pre
+              data-pii
+              className="min-w-0 flex-1 font-mono text-12 break-all whitespace-pre-wrap text-text-1 select-text"
+            >
               {cmd}
             </pre>
             <Button
@@ -305,8 +310,7 @@ function Perf({ s, set }: { s: Settings; set: (patch: unknown) => void }) {
 // Look A: white primary like the HomeLab wizard, not the app accent.
 const white = "!bg-text-1 !text-bg hover:!opacity-90 disabled:!bg-surface-3 disabled:!text-text-1";
 
-type Step =
-  "welcome" | "add" | "pick" | "perf" | "tabs" | "friend" | "remote" | "homelab" | "def" | "mac";
+type Step = "welcome" | "add" | "pick" | "perf" | "tabs" | "friend" | "remote" | "def" | "mac";
 
 const HEADS: Record<Step, [MsgKey, MsgKey]> = {
   welcome: ["tour.welcome.title", "tour.welcome.sub"],
@@ -316,7 +320,6 @@ const HEADS: Record<Step, [MsgKey, MsgKey]> = {
   tabs: ["tour.tabs.title", "tour.tabs.sub"],
   friend: ["tour.friend.title", "tour.friend.sub"],
   remote: ["tour.remote.title", "tour.remote.sub"],
-  homelab: ["tour.homelab.title", "tour.homelab.sub"],
   def: ["tour.def.title", "tour.def.sub"],
   mac: ["tour.mac.title", "tour.mac.sub"],
 };
@@ -396,21 +399,20 @@ export function Tour({ caps }: { caps: Capabilities }) {
   return (
     <Dialog.Root open onOpenChange={(o) => !o && done()}>
       <Dialog.Portal>
-        {/* drag region: the scrim covers the title bar, so the window still moves from here */}
-        <Dialog.Overlay
-          data-tauri-drag-region
-          className="sheet-fade fixed inset-0 z-40 bg-[var(--scrim)] backdrop-blur-[6px]"
-        />
+        {/* the shared scrim stops below the title bar: the window still moves and closes */}
+        <Dialog.Overlay className={SCRIM} />
         <Dialog.Content
           onInteractOutside={(e) => e.preventDefault()}
           onOpenAutoFocus={(e) => e.preventDefault()}
+          // a "Sign in" / "Import" choice opens its sheet as the tour goes: focus stays there
+          onCloseAutoFocus={(e) => e.preventDefault()}
           className="sheet-pop fixed top-1/2 left-1/2 glass z-50 flex max-h-[calc(100vh-48px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-panel"
           style={{ width: "min(36.25rem, calc(100vw - 48px))" }}
         >
           {/* header and footer stay put; only the middle scrolls when the window is short */}
           <div className="px-7 pt-6">
             <div className="flex items-center justify-between">
-              <span className="text-13 font-semibold text-text-2">
+              <span className="text-13 font-semibold text-text-2 tabular-nums">
                 {t("tour.step", { n: i + 1, total })}
               </span>
               <Dialog.Close
@@ -431,7 +433,7 @@ export function Tour({ caps }: { caps: Capabilities }) {
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-7 py-5">
             <div>
-              <Dialog.Title className="text-28 font-bold tracking-[-0.02em] text-text-1">
+              <Dialog.Title className="text-28 font-semibold tracking-[-0.02em] text-text-1">
                 {t(title)}
               </Dialog.Title>
               <Dialog.Description className="mt-1.5 text-14 text-text-2">
@@ -472,7 +474,7 @@ export function Tour({ caps }: { caps: Capabilities }) {
                       onClick={() => leaveTo(open)}
                       className="flex min-h-[10.5rem] flex-col items-start gap-1.5 rounded-control bg-surface-2 p-5 text-left shadow-[inset_0_0_0_1px_var(--hairline)] hover:bg-surface-3"
                     >
-                      <span className={clsx(tile, "mb-2.5 size-[42px]")}>
+                      <span className={clsx(tile, "mb-2.5 size-10.5")}>
                         <Icon size={20} aria-hidden />
                       </span>
                       <b className="text-14 font-semibold text-text-1">{t(label)}</b>
@@ -551,21 +553,6 @@ export function Tour({ caps }: { caps: Capabilities }) {
                   icon={<ShieldCheck size={18} aria-hidden />}
                   title={t("tour.remote.safe")}
                   body={t(caps.os === "linux" ? "tour.remote.safeD.linux" : "tour.remote.safeD")}
-                />
-              </div>
-            )}
-
-            {step === "homelab" && (
-              <div className={card}>
-                <Item
-                  icon={<Download size={18} aria-hidden />}
-                  title={t("tour.homelab.get")}
-                  body={t("tour.homelab.getD")}
-                />
-                <Item
-                  icon={<ShieldCheck size={18} aria-hidden />}
-                  title={t("tour.homelab.share")}
-                  body={t("tour.homelab.shareD")}
                 />
               </div>
             )}

@@ -77,6 +77,13 @@ export const useUi = create<UiState>((set) => ({
     })),
 }));
 
+/** Shortcut letter of a key press. A non-Latin layout reports its own letter in `key` (Ctrl+L on a
+ * Russian layout is "д"), so fall back to the physical key there; Latin layouts keep `key`. */
+export const keyLetter = (e: KeyboardEvent) =>
+  !/^[a-z]$/i.test(e.key) && /^Key[A-Z]$/.test(e.code)
+    ? e.code.slice(3).toLowerCase()
+    : e.key.toLowerCase();
+
 /** The modal surfaces. At most one is open: opening one closes the rest, whoever opened it. */
 const MODALS = ["add", "importOpen", "toolsOpen", "paletteOpen"] as const;
 type Modal = (typeof MODALS)[number];

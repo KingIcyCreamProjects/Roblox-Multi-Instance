@@ -65,6 +65,11 @@ pub async fn account_open_site(
             tauri::async_runtime::spawn(async move { signin::remove_dir_retry(&dir).await });
         }
     });
+    // Locked while the window was built: the cookie never goes in.
+    if !still_unlocked(&state, a.gen) {
+        let _ = w.destroy();
+        return Err(LOCKED.into());
+    }
     // borrowed: no extra copy of the cookie on our side (WebView keeps its own)
     let c = Cookie::build((".ROBLOSECURITY", a.ck.expose()))
         .domain(".roblox.com")
@@ -120,5 +125,13 @@ mod tests {
         let ok = |s: &str| url_ok(&s.parse().unwrap());
         assert!(!ok("https://www.roblox.com@evil.io/"));
         assert!(!ok("https://roblox.com:x@evil.io/"));
+        // a backslash ends the host; case and a trailing dot are normalised or refused
+        assert!(!ok("https://evil.io\\.roblox.com/"));
+        assert!(ok("https://www.roblox.com\\@evil.io/"));
+        assert!(ok("https://ROBLOX.COM/"));
+        assert!(!ok("https://roblox.com./"));
+        assert!(!"https://roblox.com%2eevil.io/"
+            .parse::<tauri::Url>()
+            .is_ok_and(|u| url_ok(&u)));
     }
 }

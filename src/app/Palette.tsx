@@ -9,19 +9,21 @@ import { usePlayBar } from "@/features/playbar/store";
 import { usePlay } from "@/features/playbar/usePlay";
 import { useLock } from "@/features/vault/useVault";
 import { t, type MsgKey } from "@/lib/i18n";
-import { useUi, type Route } from "./store";
+import { SCRIM, useModalFocus } from "@/components/ui/Sheet";
+import { keyLetter, useUi, type Route } from "./store";
+import { tabOrder } from "./Tabs";
 import { useSettings, useSetSettings } from "./useSettings";
 
 type Cmd = { id: string; text: string; hint?: string; icon: ReactNode; run: () => void };
 
-const ROUTES: [Route, MsgKey][] = [
-  ["home", "nav.home"],
-  ["accounts", "nav.accounts"],
-  ["discover", "nav.discover"],
-  ["automation", "nav.automation"],
-  ["devices", "nav.devices"],
-  ["settings", "nav.settings"],
-];
+const ROUTES: Record<Route, MsgKey> = {
+  home: "nav.home",
+  accounts: "nav.accounts",
+  discover: "nav.discover",
+  automation: "nav.automation",
+  devices: "nav.devices",
+  settings: "nav.settings",
+};
 const TABS: [DiscoverTab, MsgKey][] = [
   ["servers", "discover.servers"],
   ["games", "discover.games"],
@@ -47,6 +49,8 @@ function score(text: string, q: string): number | null {
 /** Ctrl/Cmd+K command palette: go to a screen, play an account, set the destination, privacy, lock. */
 export function Palette() {
   const open = useUi((u) => u.paletteOpen);
+  const remoteOpen = useUi((u) => u.remoteOpen);
+  const focus = useModalFocus();
   const setOpen = (o: boolean) => useUi.setState({ paletteOpen: o });
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
@@ -65,7 +69,7 @@ export function Palette() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "k") {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && keyLetter(e) === "k") {
         e.preventDefault();
         const { paletteOpen } = useUi.getState();
         // never stack on another open dialog (sheet, tools, import)
@@ -82,14 +86,18 @@ export function Palette() {
 
   const go = (r: Route) => useUi.getState().go(r);
   const query = q.trim();
+  // a remote session holds the route (go() ignores it), so no "Go to" commands then
+  const routes = remoteOpen
+    ? []
+    : tabOrder(s).filter((r) => r !== "automation" || s?.automation.enabled);
   const cmds: Cmd[] = [
-    ...ROUTES.filter(([r]) => r !== "automation" || s?.automation.enabled).map(([r, k]) => ({
+    ...routes.map((r) => ({
       id: `go-${r}`,
-      text: t("palette.goTo", { place: t(k) }),
+      text: t("palette.goTo", { place: t(ROUTES[r]) }),
       icon: <Navigation size={14} strokeWidth={1.75} />,
       run: () => go(r),
     })),
-    ...TABS.map(([tab, k]) => ({
+    ...(remoteOpen ? [] : TABS).map(([tab, k]) => ({
       id: `tab-${tab}`,
       text: t("palette.goTo", { place: `${t("nav.discover")} › ${t(k)}` }),
       icon: <Navigation size={14} strokeWidth={1.75} />,
@@ -154,10 +162,11 @@ export function Palette() {
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Portal>
-        <Dialog.Overlay className="sheet-fade fixed inset-0 z-40 bg-[var(--scrim)]" />
+        <Dialog.Overlay className={SCRIM} />
         <Dialog.Content
+          {...focus}
           aria-describedby={undefined}
-          className="menu fixed top-[calc(var(--titlebar-h)+48px)] left-1/2 z-50 flex max-h-[min(460px,70vh)] w-[min(560px,calc(100vw-32px))] -translate-x-1/2 flex-col overflow-hidden glass rounded-panel"
+          className="menu fixed top-[calc(var(--titlebar-h)+48px)] left-1/2 z-50 flex max-h-[min(28.75rem,70vh)] w-[min(35rem,calc(100vw-32px))] -translate-x-1/2 flex-col overflow-hidden glass rounded-panel"
         >
           <Dialog.Title className="sr-only">{t("palette.title")}</Dialog.Title>
           <input

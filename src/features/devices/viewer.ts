@@ -1,5 +1,5 @@
 // Loads the shared remote viewer (public/remote-viewer/, the same files HomeLab ships; see
-// scripts/sync-remote-viewer.mjs and viewer.test.ts) and opens a session with it.
+// tools/sync-remote-viewer.mjs and viewer.test.ts) and opens a session with it.
 
 export type ViewerHandle = { close: () => void };
 type ViewerApi = {

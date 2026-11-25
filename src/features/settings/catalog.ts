@@ -30,10 +30,12 @@ export type Item = {
   warn?: MsgKey;
   /** bool paths this value depends on: any off = the row shows dimmed */
   dep?: string[];
-  /** text fields: example value shown while empty */
-  placeholder?: string;
-  /** text commits on blur / Enter only: the setting writes at once, no Save step */
+  /** text fields: example value shown while empty (i18n key) */
+  placeholder?: MsgKey;
+  /** text commits on blur / Enter only (paths SettingsPage saves at once, no Save step) */
   onBlur?: boolean;
+  /** text holds account or login names: blurred in privacy mode */
+  pii?: boolean;
 };
 
 export type SectionId =
@@ -76,13 +78,14 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
       b("launch.startMinimized", { cap: "windowRect" }),
       n("recents.max", 1, 50),
       b("startup.launchOnLogin"),
-      b("startup.minimized"),
+      // only read when RMI was started by the login autostart
+      b("startup.minimized", { dep: ["startup.launchOnLogin"] }),
       {
         path: "startup.accounts",
         kind: "text",
-        onBlur: true,
+        pii: true,
         dep: ["startup.launchOnLogin"],
-        placeholder: "Name1, Name2",
+        placeholder: "set.startup.accounts.ph",
       },
       b("tray.enabled"),
       b("updates.auto"),
@@ -155,20 +158,22 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
         path: "friend.publicUrl",
         kind: "text",
         dep: ["friend.enabled"],
-        placeholder: "https://your-computer.ts.net",
+        placeholder: "set.friend.publicUrl.ph",
       },
       {
         path: "friend.username",
         kind: "text",
         max: 32,
-        placeholder: "friend",
+        pii: true,
+        placeholder: "set.friend.username.ph",
         dep: ["friend.enabled"],
       },
       {
         path: "friend.ownerUsername",
         kind: "text",
         max: 32,
-        placeholder: "owner",
+        pii: true,
+        placeholder: "set.friend.ownerUsername.ph",
         dep: ["friend.enabled"],
       },
       b("friend.canAdd", { dep: ["friend.enabled"], warn: "set.friend.canAdd.warn" }),
@@ -187,10 +192,11 @@ export const SECTIONS: { id: SectionId; items: Item[] }[] = [
   {
     id: "relaunch",
     items: [
-      n("relaunch.spacingSec", 0, 3600),
-      n("relaunch.defaultDelaySec", 0, 3600),
-      b("relaunch.checkInternet"),
-      b("relaunch.usePresence"),
+      // the relaunch loop only runs while Automation is on
+      n("relaunch.spacingSec", 0, 3600, { dep: A }),
+      n("relaunch.defaultDelaySec", 0, 3600, { dep: A }),
+      b("relaunch.checkInternet", { dep: A }),
+      b("relaunch.usePresence", { dep: A }),
       n("clients.minimizeEverySec", 0, 86_400, { cap: "clientHelpers", dep: A }),
       n("clients.closeAfterMin", 0, 10_080, { cap: "clientHelpers", dep: A }),
       {

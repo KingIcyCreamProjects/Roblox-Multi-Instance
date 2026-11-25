@@ -11,8 +11,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest, ubuntu-22.04] # Linux: the image release.yml builds on
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash # Windows' default PowerShell only fails a step on its last command
     steps:
       - uses: actions/checkout@v4
 

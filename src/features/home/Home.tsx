@@ -105,9 +105,6 @@ function Loaded({ list }: { list: AccountsList }) {
   );
 }
 
-const mix = (p: number) => `color-mix(in oklch, var(--bg) ${p}%, transparent)`;
-const SCRIM = `linear-gradient(to top, var(--bg) 0%, ${mix(92)} 18%, ${mix(70)} 40%, ${mix(35)} 68%, transparent 100%)`;
-
 function Hero({ g, list }: { g: HeroGame; list: AccountsList }) {
   const sel = useUi((u) => u.sel.ids);
   const { play } = usePlay();
@@ -121,14 +118,10 @@ function Hero({ g, list }: { g: HeroGame; list: AccountsList }) {
     <section aria-labelledby="home-hero" className="@container relative isolate">
       <Thumb
         src={g.thumbnail}
-        className="aspect-video max-h-[min(54vh,480px)] min-h-[260px] w-full [@media(max-height:700px)]:max-h-[44vh]"
+        className="aspect-video max-h-[min(54vh,30rem)] min-h-65 w-full [@media(max-height:700px)]:max-h-[44vh]"
       />
-      {/* soft bottom scrim carries the text; theme-aware so both themes read */}
-      <div
-        aria-hidden
-        className="absolute inset-x-0 bottom-0 h-3/4"
-        style={{ background: SCRIM }}
-      />
+      {/* soft bottom scrim carries the text; theme-aware so both themes read (index.css) */}
+      <div aria-hidden className="hero-scrim absolute inset-x-0 bottom-0 h-3/4" />
       {/* the one ambient bloom, tinted from the thumbnail; straddles the edge so it reads continuous */}
       <div
         aria-hidden
@@ -152,7 +145,8 @@ function Hero({ g, list }: { g: HeroGame; list: AccountsList }) {
           aria-disabled={block ? true : undefined}
           // play() toasts the block itself and refetches caps, so an install unblocks the next try
           onClick={() => play(ids, { here: true, dest: g.dest })}
-          className="mt-6 inline-flex h-11 items-center gap-2 rounded-full bg-accent px-6 shadow-[inset_0_1px_0_rgb(255_255_255/0.3)] text-14 font-semibold text-accent-ink transition-colors duration-[var(--dur-quick)] hover:bg-accent-hover focus-visible:shadow-[var(--focus-ring)] active:bg-accent-press disabled:pointer-events-none disabled:bg-surface-3 disabled:text-text-1 disabled:opacity-40"
+          // blocked or no account: the Play bar's neutral look (aria-disabled still clicks, to toast why)
+          className="mt-6 inline-flex h-11 items-center gap-2 rounded-full bg-accent px-6 shadow-[inset_0_1px_0_rgb(255_255_255/0.3)] text-14 font-semibold text-accent-ink transition-colors duration-[var(--dur-quick)] hover:bg-accent-hover focus-visible:shadow-[var(--focus-ring)] active:bg-accent-press disabled:pointer-events-none disabled:bg-surface-3 disabled:text-text-3 disabled:shadow-none aria-disabled:cursor-not-allowed aria-disabled:bg-surface-3 aria-disabled:text-text-3 aria-disabled:shadow-none aria-disabled:hover:bg-surface-3 aria-disabled:active:bg-surface-3"
         >
           <Play size={16} strokeWidth={2.25} fill="currentColor" />
           {ids.length > 1 ? t("playbar.playN", { n: ids.length }) : t("playbar.play")}
@@ -168,14 +162,15 @@ function Hero({ g, list }: { g: HeroGame; list: AccountsList }) {
 function NoHero() {
   const go = useUi((u) => u.go);
   return (
-    <section className="flex min-h-[300px] flex-col justify-end px-8 pt-16 pb-10">
+    <section className="flex min-h-75 flex-col justify-end px-8 pt-16 pb-10">
       <h1 className="max-w-[20ch] text-44 leading-[1.05] font-semibold tracking-[-0.03em] text-balance text-text-1">
         {t("home.empty.title")}
       </h1>
       <p className="mt-4 max-w-[46ch] text-16 text-text-2">{t("home.empty.body")}</p>
       <div className="mt-8">
         <Button
-          className="h-10 rounded-full px-5 text-14"
+          pill
+          className="text-14"
           onClick={() => {
             useDiscover.getState().setTab("games");
             go("discover");
@@ -193,7 +188,7 @@ function HeroSkeleton() {
   return (
     <div
       aria-hidden
-      className="aspect-video max-h-[min(54vh,480px)] min-h-[260px] w-full [@media(max-height:700px)]:max-h-[44vh] animate-pulse bg-[var(--skeleton)]"
+      className="aspect-video max-h-[min(54vh,30rem)] min-h-65 w-full [@media(max-height:700px)]:max-h-[44vh] animate-pulse bg-[var(--skeleton)]"
     />
   );
 }
@@ -213,7 +208,7 @@ function JumpBackIn({
       </h2>
       <ul className={strip} onKeyDown={rove.onKeyDown}>
         {recents.map((r, i) => (
-          <li key={`${r.placeId}-${r.lastPlayedAt}`} className="w-[232px] shrink-0 snap-start">
+          <li key={`${r.placeId}-${r.lastPlayedAt}`} className="w-58 shrink-0 snap-start">
             <button
               type="button"
               {...rove.item(i)}
@@ -272,7 +267,7 @@ function OnlineNow({ list }: { list: AccountsList }) {
                   onDoubleClick={() => play([a.id])}
                   title={t("home.onlineHint")}
                   className={clsx(
-                    "flex w-[96px] flex-col items-center gap-2 rounded-panel px-1.5 py-2.5 transition-colors duration-[var(--dur-quick)]",
+                    "flex w-24 flex-col items-center gap-2 rounded-panel px-1.5 py-2.5 transition-colors duration-[var(--dur-quick)]",
                     on ? "bg-surface-3" : "hover:bg-surface-3/60",
                   )}
                 >

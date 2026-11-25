@@ -40,8 +40,15 @@ pub struct Preview {
 }
 
 fn folder(path: &str) -> CmdResult<PathBuf> {
+    use std::path::{Component, Prefix};
     let p = PathBuf::from(path.trim());
-    if p.is_absolute() && p.is_dir() {
+    // Every `\\?\` verbatim path (`GLOBALROOT`, `UNC`, even `\\?\C:\`) and `\\.\` device
+    // paths are refused (they can reach a device or the network unseen, or skip path
+    // normalisation); drive paths and a plain `\\host\share` pass.
+    let plain = !matches!(p.components().next(), Some(Component::Prefix(x))
+        if matches!(x.kind(), Prefix::Verbatim(_) | Prefix::VerbatimUNC(..)
+            | Prefix::VerbatimDisk(_) | Prefix::DeviceNS(_)));
+    if plain && p.is_absolute() && p.is_dir() {
         Ok(p)
     } else {
         Err("Choose a folder.".into())
@@ -181,9 +188,10 @@ pub async fn import_preview(
         // accounts not wanted: never decrypt, no cookies held
         _ if !accounts => (Vec::new(), 0),
         Some((p, Ok(_))) => {
-            let bytes = Zeroizing::new(read_capped(&p).map_err(|e| e.to_string())?);
-            // Argon2 (256 MiB) off the async runtime; the old password drops with the closure
+            // The read (up to 32 MiB) and Argon2 (256 MiB) off the async runtime; the old
+            // password drops with the closure
             tauri::async_runtime::spawn_blocking(move || {
+                let bytes = Zeroizing::new(read_capped(&p)?);
                 decrypt(&bytes, password.as_ref().map(|s| s.as_str()))
             })
             .await
@@ -469,11 +477,11 @@ pub(crate) fn commit_vault(
 
 /// Old game name, or the placeId when empty; at most 100 chars.
 fn game_name(g: &LegacyGame) -> String {
-    let n = g.name.trim();
+    let n = super::clean(&g.name, 100);
     if n.is_empty() {
         g.place_id.to_string()
     } else {
-        n.chars().take(100).collect()
+        n
     }
 }
 
@@ -585,7 +593,13 @@ pub async fn import_commit(
     let mut notes = Vec::new();
     let mut retry = false;
     if let Some(patch) = patch {
-        notes.push(match persist(st, &patch) {
+        let r = crate::commands::blocking(&app, move |s| persist(s, &patch)).await;
+        if r.is_ok() {
+            // the follow-up of a normal settings save (multi-instance status, watcher rules)
+            crate::commands::state_changed(&app, &["settings", "roblox"]);
+            crate::watcher::reconcile(&app);
+        }
+        notes.push(match r {
             // read-only mode: persist only applied them in memory
             Ok(_) if st.settings_read_only => {
                 "Settings applied for this session only (settings.json is read-only).".into()
@@ -667,6 +681,22 @@ mod tests {
     use crate::import::{LaunchTarget, WindowRect};
     use crate::vault::{oswrap::FakeOsWrap, store::CreateMode};
     use std::sync::Arc;
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_refuses_verbatim_device_paths() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(folder(&d.path().display().to_string()).is_ok());
+        let verbatim_disk = format!(r"\\?\{}", d.path().display());
+        for p in [
+            r"\\?\GLOBALROOT\Device",
+            r"\\?\UNC\localhost\c$",
+            r"\\.\C:\",
+            &verbatim_disk,
+        ] {
+            assert!(folder(p).is_err(), "{p}");
+        }
+    }
 
     fn legacy(uid: Option<u64>, name: &str) -> ImportedAccount {
         ImportedAccount {

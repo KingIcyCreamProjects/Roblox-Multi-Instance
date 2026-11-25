@@ -251,6 +251,10 @@ test("Outfits: unknown username shows the error; a valid one lists outfits", asy
   expect(
     await screen.findByRole("list", { name: t("outfits.title", { name: "Builder_1" }) }),
   ).toBeInTheDocument();
+  // the side panel's "Outfits of {name}" blurs in privacy mode
+  expect(
+    screen.getByText(t("outfits.title", { name: "Builder_1" }), { selector: "span" }),
+  ).toHaveAttribute("data-pii");
 });
 
 test("Games search: no-match line, then Escape clears the box", async () => {
@@ -282,7 +286,10 @@ test("Recents: Clear empties the list and says so", async () => {
   );
   const clear = await screen.findByRole("button", { name: t("recents.clear") });
   await waitFor(() => expect(clear).toBeEnabled());
+  // the whole history: asks first
   await userEvent.click(clear);
+  expect(screen.getByText(t("recents.clearAsk"))).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: t("recents.clear") }));
   expect(await screen.findByText(t("recents.empty"))).toBeInTheDocument();
 });
 

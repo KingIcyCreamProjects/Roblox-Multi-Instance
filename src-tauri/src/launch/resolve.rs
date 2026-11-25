@@ -375,6 +375,10 @@ async fn game_request(
             let code = PrivateCode::Link(link_code);
             return Ok((JoinRequest::Private { place_id, code }, Some(place_id)));
         }
+        // A game-instance link names its place too, like a private server link.
+        if let Some(Destination::Job { place_id, job_id }) = parse_destination(&bar.server) {
+            return Ok((JoinRequest::Job { place_id, job_id }, Some(place_id)));
+        }
         // A share link in the server field (or a saved privateLink) is resolved like the
         // destination field would be.
         if let Some(Destination::Share { code, kind }) = parse_destination(&bar.server) {
@@ -599,6 +603,12 @@ mod tests {
             matches!(r, Some(JoinRequest::Private { place_id: 8, code: PrivateCode::Link(ref l) }) if l == "LC")
                 && p == Some(8)
         );
+        // a game-instance link in the server field brings its own place
+        let inst = format!("https://www.roblox.com/games/9/x?gameInstanceId={j}");
+        let (r, p) = join_request(&c, &jr("", &inst, Mode::Specific), &ck, &rec, 1)
+            .await
+            .unwrap();
+        assert!(matches!(r, Some(JoinRequest::Job { place_id: 9, .. })) && p == Some(9));
         assert!(join_request(&c, &jr("5", "", Mode::Specific), &ck, &rec, 1)
             .await
             .is_err());

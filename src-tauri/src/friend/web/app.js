@@ -89,6 +89,7 @@ function showLogin(msg) {
   $("add").hidden = true;
   addAt = 0;
   if ($("add-sheet").open) $("add-sheet").close();
+  if ($("sheet").open) $("sheet").close("no"); // a Disconnect confirm must not sit over the login
   loading();
 }
 
@@ -189,13 +190,24 @@ function makeCard(acc) {
   field.hidden = true;
   field.setAttribute("aria-label", "Game link, private server link or place ID");
   field.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); run(c); } }; // Android "Go"
-  const toggle = el("button", "link", "Use a different game");
+  field.id = "game-" + ++fieldN;
+  const toggle = el("button", "link");
   toggle.type = "button";
-  toggle.onclick = () => { field.hidden = !field.hidden; toggle.textContent = field.hidden ? "Use a different game" : "Use the same game"; if (!field.hidden) field.focus(); };
+  toggle.setAttribute("aria-controls", field.id);
   acts.append(field, toggle);
 
   const c = { li, acc, pend: null, refs: { av, name, sub, pill, game, up, comp, compText, act, field, toggle, acts, note } };
+  showField(c.refs, false);
+  toggle.onclick = () => { showField(c.refs, field.hidden); if (!field.hidden) field.focus(); };
   return c;
+}
+
+let fieldN = 0;
+// The "different game" field and its toggle (label and aria-expanded follow it).
+function showField(r, open) {
+  r.field.hidden = !open;
+  r.toggle.textContent = open ? "Use the same game" : "Use a different game";
+  r.toggle.setAttribute("aria-expanded", String(open));
 }
 
 // inGame/online/starting: RMI has a client for it here, offer Disconnect. offline/paused (or unknown),
@@ -279,7 +291,7 @@ function paint(c, acc) {
   let text;
   if (p) {
     text = p.kind === "disconnect" ? "Disconnecting…" : "Reconnecting…";
-    if (p.kind === "reconnect") note(c, "Starting Roblox. This can take a minute.");
+    if (p.kind === "reconnect" && !p.slow) note(c, "Starting Roblox. This can take a minute.");
   } else {
     text = live ? "Disconnect" : "Reconnect";
     if (c.shown && c.shown !== text) c.hold = Date.now() + HOLD_MS;
@@ -299,7 +311,7 @@ function paint(c, acc) {
   r.act.classList.toggle("danger", live && !p);
   c.li.classList.toggle("busy", !!p);
   r.toggle.hidden = live || !!p;
-  if (live || p) { r.field.hidden = true; r.toggle.textContent = "Use a different game"; }
+  if (live || p) showField(r, false);
   r.acts.hidden = r.toggle.hidden && r.field.hidden;
   loadAvatar(c);
 }
@@ -352,7 +364,7 @@ async function run(c) {
   } catch (e) {
     if (e.code === "timeout") {
       // the server gave up waiting, but the launch or close keeps going: watch for the result
-      c.pend = { kind, t0: Date.now(), posting: false };
+      c.pend = { kind, t0: Date.now(), posting: false, slow: true }; // slow: paint keeps this note
       paint(c, c.acc);
       note(c, "The owner's computer is slow. Checking…");
       poke();
@@ -361,8 +373,7 @@ async function run(c) {
     c.pend = null;
     paint(c, c.acc);
     if (e.code === "no_game" || e.code === "bad_link") {
-      refs.field.hidden = false;
-      refs.toggle.textContent = "Use the same game";
+      showField(refs, true);
       refs.field.focus();
       errNote(c, e.code === "no_game" ? "This account has no game saved. Paste a game link below." : "Paste a Roblox game link or place ID.");
     } else if (e.code === "unauthorized") {
@@ -378,7 +389,8 @@ async function run(c) {
       errNote(c, "The owner's RMI is locked. Ask them to unlock it.", true);
     } else if (e.code === "network") {
       fail(e);
-      errNote(c, "Not sent. Try again when it's back.", true);
+      // the request may have reached the owner's computer before the answer was lost
+      errNote(c, "No answer from the owner's computer. Check this card before trying again.", true);
     } else {
       errNote(c, e.message);
     }
@@ -531,7 +543,7 @@ function addSay(text, kind) {
 
 // "pending": code out; "done": added; "over": expired/failed, maybe a new code; "stop": no retry.
 function addButtons(state) {
-  if (state !== addState) addHold = Date.now() + HOLD_MS;
+  if (addState && state !== addState) addHold = Date.now() + HOLD_MS; // not on open: Cancel works at once
   addState = state;
   $("add-copy").disabled = !$("add-code").textContent;
   $("add-copy").hidden = state !== "pending"; // a used or dead code is not worth copying

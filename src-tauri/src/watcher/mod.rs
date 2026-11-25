@@ -130,18 +130,6 @@ pub struct Status {
     pub rules: Vec<RuleStatus>,
 }
 
-/// Broadcast on every successful close (auto-relaunch); the UI gets `state://changed` instead.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Action {
-    pub account_id: Option<String>,
-    pub pid: u32,
-    pub rule: &'static str,
-    pub at: i64,
-    /// Closes of this account in the last 10 minutes, including this one.
-    pub count: u32,
-}
-
 #[derive(Default)]
 struct Shared {
     clients: Vec<ClientInfo>,
@@ -154,7 +142,6 @@ struct Shared {
 
 pub struct Watcher {
     shared: Arc<Mutex<Shared>>,
-    tx: tokio::sync::broadcast::Sender<Action>,
     running: AtomicBool,
     /// Bumped on every start/stop; a scanner whose generation is stale does nothing more.
     epoch: Arc<AtomicU64>,
@@ -173,7 +160,6 @@ impl Default for Watcher {
     fn default() -> Self {
         Self {
             shared: Default::default(),
-            tx: tokio::sync::broadcast::channel(32).0,
             running: AtomicBool::new(false),
             epoch: Default::default(),
             wake: Default::default(),
@@ -189,11 +175,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Watcher {
-    /// Auto-relaunch (M8.3) subscribes here: a watcher close counts as a disconnect.
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Action> {
-        self.tx.subscribe()
-    }
-
     pub fn status(&self, cfg: &rules::Cfg) -> Status {
         let sh = lock(&self.shared);
         Status {
@@ -456,21 +437,27 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
     tokio::time::sleep(Duration::from_secs(r.delay_s)).await;
     // watcher.waitForGame: no launch while a fullscreen app (a game) is in front; every
     // check below runs fresh once it is gone.
-    let wait = || {
+    let wait = || async {
         let on = {
             let st = app.state::<crate::AppState>();
             let s = lock(&st.settings);
             let b = |p| s.pointer(p) == Some(&serde_json::Value::Bool(true));
             b("/watcher/waitForGame") && b("/watcher/reconnect") && b("/watcher/enabled")
         };
-        on && other_app_front().is_some_and(|(h, _)| win::fullscreen(h))
+        // Process and window queries: off the async workers.
+        on && tauri::async_runtime::spawn_blocking(|| {
+            other_app_front().is_some_and(|(h, _)| win::fullscreen(h))
+        })
+        .await
+        .unwrap_or(false)
     };
-    if wait() {
+    // Until the vault check below, the vault may be locked: account id in logs, not the name.
+    if wait().await {
         log::info!(
             "watcher: a fullscreen app is in front; holding reconnect of {}",
-            r.name
+            r.id
         );
-        while wait() {
+        while wait().await {
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     }
@@ -478,7 +465,7 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
     while !crate::automation::relaunch::online().await {
         tries += 1;
         if tries > 60 {
-            log::warn!("watcher: still offline; not reconnecting {}", r.name);
+            log::warn!("watcher: still offline; not reconnecting {}", r.id);
             return false;
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -494,11 +481,11 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
         return false;
     }
     if friend_paused(&st, &r.id) {
-        log::info!("watcher: {} is friend-paused; not reconnecting", r.name);
+        log::info!("watcher: {} is friend-paused; not reconnecting", r.id);
         return false;
     }
     let Some(target) = saved_target(&st, &r.id) else {
-        log::info!("watcher: vault locked; not reconnecting {}", r.name);
+        log::info!("watcher: vault locked; not reconnecting {}", r.id);
         return false;
     };
     // The saved target may have been cleared during the delay.
@@ -507,18 +494,25 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
         return false;
     }
     let (bar, all) = reconnect_bar(r.last_join, r.plain, r.start_place, target, r.same_server);
-    // Foreground before the launch: guard it only when it is not Roblox or RMI.
-    let prev = other_app_front();
     let (a, tracker) = (app.clone(), r.tracker.clone());
-    let running = tauri::async_runtime::spawn_blocking(move || {
-        !a.state::<crate::AppState>()
-            .platform
-            .tracked_pids(&tracker)
-            .is_empty()
+    // Foreground before the launch (guarded only when it is not Roblox or RMI), and its pids;
+    // both block, so off the async workers.
+    let (prev, pids) = tauri::async_runtime::spawn_blocking(move || {
+        let pids = a.state::<crate::AppState>().platform.tracked_pids(&tracker);
+        (other_app_front(), pids)
     })
     .await
-    .unwrap_or(false);
-    if running {
+    .unwrap_or((None, None));
+    let Some(pids) = pids else {
+        // Unknown is not "none run": no launch over a client that may still be there.
+        // Handed back: auto-relaunch judges it once the process list reads again.
+        log::warn!(
+            "watcher: process list unreadable; not reconnecting {}",
+            r.name
+        );
+        return false;
+    };
+    if !pids.is_empty() {
         log::info!("watcher: {} already has a client; not reconnecting", r.name);
         return true;
     }
@@ -526,6 +520,23 @@ async fn rejoin_go(app: &tauri::AppHandle, r: RejoinReq) -> bool {
     // the launch whose client was just closed.
     if st.automation.own_running(&r.id) {
         log::info!("watcher: {} has an RMI launch; not reconnecting", r.name);
+        return true;
+    }
+    // Another computer took it meanwhile (Run here there, Run on, or a paired computer's
+    // plain Play it reports): it stays closed here.
+    let uid = lock(&st.vault).as_ref().and_then(|v| {
+        let p = v.payload();
+        p.accounts
+            .iter()
+            .find(|a| a.id == r.id)
+            .and_then(|a| a.user_id)
+    });
+    let elsewhere = uid.is_some_and(|u| st.remote.running_elsewhere().iter().any(|(i, _)| *i == u));
+    if elsewhere || st.automation.handed_over(&r.id) {
+        log::info!(
+            "watcher: {} runs on another computer now; not reconnecting",
+            r.name
+        );
         return true;
     }
     // A pause can land while the close ran: start_batch would clear it.

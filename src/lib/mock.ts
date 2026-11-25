@@ -8,6 +8,7 @@ import {
   type GameTile,
   type LaunchTarget,
   type PresenceState,
+  type RemoteTarget,
 } from "./ipc";
 import { useUi, type Route } from "@/app/store";
 import { useDiscover, type DiscoverTab } from "@/features/discover/shared";
@@ -222,6 +223,8 @@ const REMOTE = () => ({
   session: null as { peer: string; since: string; control: boolean } | null,
   /** what remote_elsewhere answers */
   elsewhere: [] as Elsewhere[],
+  /** what remote_targets answers */
+  targets: [] as RemoteTarget[],
 });
 export const mockRemote = REMOTE();
 export const resetVaultMock = () => {
@@ -1008,6 +1011,10 @@ export async function mockCall(cmd: string, args?: unknown): Promise<unknown> {
       return mockRemote.elsewhere;
     case "remote_run_here":
       return (args as { userIds: number[] }).userIds;
+    case "remote_send":
+      return { started: (args as { userIds: number[] }).userIds, still: [] };
+    case "remote_targets":
+      return mockRemote.targets;
     case "homelab_latest": {
       const q = new URLSearchParams(location.search).get("hl");
       const mode = q === "offline" || q === "loading" || q === "nobuild" ? q : mockHomeLab.mode;

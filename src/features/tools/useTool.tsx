@@ -225,10 +225,11 @@ export function Q<T>({ q, children }: { q: UseQueryResult<T>; children: (d: T) =
 }
 
 /** Tool data queries: no shell banner (errors show inline), always fresh on open. */
-export function useToolQuery<T>(key: unknown[], fn: () => Promise<T>) {
+export function useToolQuery<T>(key: unknown[], fn: () => Promise<T>, enabled = true) {
   return useQuery({
     queryKey: ["tool", ...key],
     queryFn: fn,
+    enabled,
     meta: { silent: true },
     staleTime: 0,
   });

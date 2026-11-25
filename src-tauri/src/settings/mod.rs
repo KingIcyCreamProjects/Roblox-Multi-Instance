@@ -250,6 +250,13 @@ pub fn apply_patch(cur: &Value, patch: &Value) -> Result<Value, String> {
     if ["ws", "api", "friend"].iter().any(|k| clash("remote", k)) {
         return Err("Remote access needs its own port.".into());
     }
+    // A friend address the Host guard would refuse is a dead link: refuse it here (empty
+    // clears it). Only when this patch sets it, like the port clash.
+    if let Some(Value::String(u)) = patch.pointer("/friend/publicUrl") {
+        if !u.trim().is_empty() {
+            crate::friend::link_of(u)?;
+        }
+    }
     Ok(next)
 }
 
@@ -625,6 +632,29 @@ mod tests {
         std::fs::create_dir(&q).unwrap();
         assert!(save(&q, &defaults()).is_err());
         assert!(!d.path().join("dir.json.tmp").exists());
+    }
+
+    #[test]
+    fn friend_address_checked_at_save() {
+        let d = defaults();
+        let set = |u: &str| apply_patch(&d, &json!({"friend": {"publicUrl": u}}));
+        assert!(set("https://user@name.ts.net").is_err());
+        assert!(set("http://name.ts.net").is_err());
+        assert!(set("https://name.ts.net").is_ok());
+        assert!(set("").is_ok());
+    }
+
+    #[test]
+    fn failed_save_keeps_old_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        save(&p, &defaults()).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        // a directory where the temp file goes: the write fails before any rename
+        std::fs::create_dir(d.path().join("settings.json.tmp")).unwrap();
+        let v = apply_patch(&defaults(), &json!({"fps":{"value":30}})).unwrap();
+        assert!(save(&p, &v).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), before);
     }
 
     #[test]

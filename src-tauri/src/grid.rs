@@ -216,7 +216,8 @@ pub fn plan(n: usize, work: Rect, layout: &Layout, main: usize) -> Vec<Target> {
     match layout {
         Layout::Auto => rows(&auto_rows(n), Align::Center, work, 0, 1),
         Layout::Columns { count } => {
-            let c = (*count).max(1) as usize;
+            // From settings or IPC: a huge count would wrap through `as i32` in `rows`.
+            let c = (*count).clamp(1, 100) as usize;
             rows(&chunk(n, c), Align::Left, work, c, 2)
         }
         Layout::Rows { counts, align } => rows(&fit_counts(counts, n), *align, work, 0, 1),
@@ -799,6 +800,14 @@ mod tests {
             plan(3, WORK, &Layout::Columns { count: 0 }, 0),
             plan(3, WORK, &Layout::Columns { count: 1 }, 0)
         );
+        // A huge count (hand-edited settings) is capped, never wrapped to a negative width.
+        assert_eq!(
+            plan(3, WORK, &Layout::Columns { count: u32::MAX }, 0),
+            plan(3, WORK, &Layout::Columns { count: 100 }, 0)
+        );
+        assert!(plan(3, WORK, &Layout::Columns { count: u32::MAX }, 0)
+            .iter()
+            .all(|t| t.cell.w > 0));
     }
 
     #[test]

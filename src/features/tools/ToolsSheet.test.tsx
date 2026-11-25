@@ -60,6 +60,28 @@ test("PIN_REQUIRED opens the prompt, unlock retries the same email change once",
   expect(await screen.findByText("n****@example.com")).toBeInTheDocument(); // masked refreshed
 });
 
+test("Esc while an op runs keeps the sheet open and says why; its result still shows", async () => {
+  const orig = mock.mockCall;
+  let release = () => {};
+  vi.spyOn(mock, "mockCall").mockImplementation((cmd, args) =>
+    cmd === "tool_email_set"
+      ? new Promise((r) => (release = () => r(undefined)))
+      : orig(cmd, args as never),
+  );
+  const user = userEvent.setup();
+  setup(["acc-1"]);
+  await user.click(await tab("tools.email"));
+  await user.type(await screen.findByLabelText(t("tools.email.new")), "new@example.com");
+  await user.type(screen.getByLabelText(t("tools.email.password")), "hunter2hunter2");
+  await user.click(screen.getByRole("button", { name: t("tools.email.cta") })); // hangs
+  await user.keyboard("{Escape}");
+  expect(await screen.findByText(t("tools.stillWorking"))).toBeInTheDocument();
+  expect(useUi.getState().toolsOpen).toBe(true);
+  await act(async () => release());
+  expect(await screen.findByText(t("tools.email.ok"))).toBeInTheDocument();
+  expect(screen.queryByText(t("tools.stillWorking"))).toBeNull();
+});
+
 test("an op still running for another selection does not freeze these tabs", async () => {
   const orig = mock.mockCall;
   vi.spyOn(mock, "mockCall").mockImplementation((cmd, args) =>

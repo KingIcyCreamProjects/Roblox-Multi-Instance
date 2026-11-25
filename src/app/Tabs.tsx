@@ -1,3 +1,4 @@
+import * as Tooltip from "@radix-ui/react-tooltip";
 import clsx from "clsx";
 import {
   Bot,
@@ -55,26 +56,37 @@ export function Tabs({ automation }: { automation: boolean }) {
           const active = route === r;
           const { icon: Icon, label } = ITEMS[r];
           return (
-            <button
-              key={r}
-              type="button"
-              onClick={() => go(r)}
-              aria-current={active ? "page" : undefined}
-              title={t(label)}
-              className={clsx(
-                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-13 font-semibold transition-colors duration-[var(--dur-quick)]",
-                active
-                  ? "bg-accent text-accent-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.35),0_4px_12px_rgb(30_80_255/0.35)]"
-                  : "text-text-2 hover:bg-surface-3 hover:text-text-1",
-                "focus-visible:shadow-[var(--focus-ring)]",
-              )}
-            >
-              <Icon size={16} strokeWidth={1.75} />
-              {/* icon-only when the title bar's centre gets too narrow (window width, UI scale) */}
-              <span className={automation ? "@max-[37rem]:sr-only" : "@max-[31.5rem]:sr-only"}>
-                {t(label)}
-              </span>
-            </button>
+            // the same styled tooltip as IconButton: it names the tab when it shrinks to its icon
+            <Tooltip.Root key={r}>
+              <Tooltip.Trigger asChild>
+                <button
+                  type="button"
+                  onClick={() => go(r)}
+                  aria-current={active ? "page" : undefined}
+                  className={clsx(
+                    "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-13 font-semibold transition-colors duration-[var(--dur-quick)]",
+                    active
+                      ? "bg-accent text-accent-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.35),0_4px_12px_color-mix(in_oklch,var(--accent)_35%,transparent)]"
+                      : "text-text-2 hover:bg-surface-3 hover:text-text-1",
+                    "focus-visible:shadow-[var(--focus-ring)]",
+                  )}
+                >
+                  <Icon size={16} strokeWidth={1.75} />
+                  {/* icon-only when the title bar's centre gets too narrow (window width, UI scale) */}
+                  <span className={automation ? "@max-[37rem]:sr-only" : "@max-[31.5rem]:sr-only"}>
+                    {t(label)}
+                  </span>
+                </button>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content
+                  sideOffset={6}
+                  className="glass z-50 rounded-chip px-2 py-1 text-12 text-text-1"
+                >
+                  {t(label)}
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
           );
         })}
     </nav>
@@ -114,8 +126,16 @@ export function TabOrder() {
             className="flex items-center gap-3 border-t border-[var(--hairline)] py-1.5 pr-1 pl-4 first:border-t-0"
           >
             <span className="w-4 text-13 text-text-3 tabular-nums">{i + 1}</span>
-            <Icon size={16} strokeWidth={1.75} />
-            <span className="flex-1 text-14 font-semibold text-text-1">{name}</span>
+            {/* Automation off: its tab is hidden, so dimmed here; it keeps its place for later */}
+            <span
+              className={clsx(
+                "flex flex-1 items-center gap-3",
+                r === "automation" && s?.automation.enabled === false && "opacity-50",
+              )}
+            >
+              <Icon size={16} strokeWidth={1.75} />
+              <span className="flex-1 text-14 font-semibold text-text-1">{name}</span>
+            </span>
             <button
               type="button"
               id={`tab-move-${r}--1`}

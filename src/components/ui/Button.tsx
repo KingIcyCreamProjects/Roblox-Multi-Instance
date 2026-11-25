@@ -22,13 +22,18 @@ export function Button({
   className,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; sm?: boolean; pill?: boolean }) {
+  // A caller's own height, padding, radius or font size replaces the default: two utilities for
+  // one property would leave the winner to CSS order, not to the caller.
+  const own = (re: RegExp, cls: string) => (re.test(className ?? "") ? null : cls);
   return (
     <button
       type="button"
       className={clsx(
-        "inline-flex items-center justify-center gap-1.5 text-13 font-semibold whitespace-nowrap",
-        sm ? "h-7 px-3" : pill ? "h-10 px-5" : "h-[var(--control-h)] px-3.5",
-        pill ? "rounded-full" : "rounded-control",
+        "inline-flex items-center justify-center gap-1.5 font-semibold whitespace-nowrap",
+        own(/(^|\s)text-\d/, "text-13"),
+        own(/(^|\s)h-/, sm ? "h-7" : pill ? "h-10" : "h-[var(--control-h)]"),
+        own(/(^|\s)px-/, sm ? "px-3" : pill ? "px-5" : "px-3.5"),
+        own(/(^|\s)rounded-/, pill ? "rounded-full" : "rounded-control"),
         "transition-colors duration-[var(--dur-quick)] focus-visible:shadow-[var(--focus-ring)] disabled:pointer-events-none",
         styles[variant],
         className,

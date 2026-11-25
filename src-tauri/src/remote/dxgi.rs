@@ -213,6 +213,11 @@ impl Dup {
             self.ctx.Map(stage, 0, D3D11_MAP_READ, 0, Some(&mut m))?;
         }
         let (pitch, row) = (m.RowPitch as usize, w as usize * 4);
+        if m.pData.is_null() || pitch < row {
+            // SAFETY: mapped above.
+            unsafe { self.ctx.Unmap(stage, 0) };
+            return Err(E_FAIL.into());
+        }
         // SAFETY: a mapped BGRA texture: `h` rows `pitch` bytes apart, `row` bytes each.
         let src = unsafe {
             std::slice::from_raw_parts(m.pData as *const u8, pitch * (h as usize - 1) + row)

@@ -460,6 +460,24 @@ async fn relaunch<H: Host>(h: H, r: Relaunch) {
         ..Default::default()
     };
     let (bar, given) = bar_of(&req);
+    // A paired computer reports it running (a plain Play there, no hand-over here): starting it
+    // here would kick that session. Read before the engine lock.
+    let elsewhere = {
+        let uid = guard(&h.st().vault).as_ref().and_then(|v| {
+            let p = v.payload();
+            p.accounts
+                .iter()
+                .find(|a| a.id == r.id)
+                .and_then(|a| a.user_id)
+        });
+        uid.is_some_and(|u| {
+            h.st()
+                .remote
+                .running_elsewhere()
+                .iter()
+                .any(|(i, _)| *i == u)
+        })
+    };
     // Engine lock spans the epoch check and the start: a reset either precedes both or
     // follows the start (then only the re-arm is dropped).
     let started = {
@@ -469,9 +487,11 @@ async fn relaunch<H: Host>(h: H, r: Relaunch) {
             e.retry(&r.account, Instant::now(), None, r.epoch);
             return;
         }
-        // Backstop: paused, or launched by another path (Launch, friend, watcher), after this
-        // relaunch was decided.
-        if h.st().automation.own_running(&r.id)
+        // Backstop: paused, handed to or running on another computer, or launched by another
+        // path (Launch, friend, watcher), after this relaunch was decided.
+        if elsewhere
+            || h.st().automation.own_running(&r.id)
+            || h.st().automation.handed_over(&r.id)
             || guard(&h.st().vault)
                 .as_ref()
                 .is_some_and(|v| crate::accounts::friend_paused(v.payload(), &r.id))
@@ -479,7 +499,15 @@ async fn relaunch<H: Host>(h: H, r: Relaunch) {
             e.retry(&r.account, Instant::now(), None, r.epoch);
             return;
         }
-        start_batch(&h, vec![r.id], bar, given, false)
+        start_batch(&h, vec![r.id.clone()], bar, given, false)
+    };
+    // Locked: the account id in the log, never the username (locked state logs no usernames).
+    let who = || {
+        if guard(&h.st().vault).is_some() {
+            r.account.clone()
+        } else {
+            format!("id {}", r.id)
+        }
     };
     let why = match started {
         Err(e) if e == LOCKED || e == WAS_LOCKED => "the vault is locked".into(),
@@ -509,7 +537,7 @@ async fn relaunch<H: Host>(h: H, r: Relaunch) {
                 None => {
                     // Evicted or still running after FOLLOW_MAX: it may yet launch, so a
                     // re-arm could launch twice. The next exit/disconnect re-triggers.
-                    log::warn!("relaunch {:?}: launch status lost", r.account);
+                    log::warn!("relaunch {:?}: launch status lost", who());
                     let t = "Relaunch status lost; not retried";
                     hub.note(&r.account, "warn", t);
                     return;
@@ -518,7 +546,7 @@ async fn relaunch<H: Host>(h: H, r: Relaunch) {
         }
     };
     fin.rearm = Some(r.delay);
-    log::warn!("relaunch {:?} failed: {why}", r.account);
+    log::warn!("relaunch {:?} failed: {why}", who());
     let msg = format!(
         "Relaunch failed: {why}; retrying in {} s",
         r.delay.as_secs()
@@ -593,12 +621,16 @@ impl Loop {
             let live =
                 tokio::task::spawn_blocking(move || h2.st().platform.tracked_clients(&trackers))
                     .await
-                    .unwrap_or_default();
-            let alive: HashSet<String> = live.iter().map(|(_, t)| t.clone()).collect();
-            exited = self.had.difference(&alive).cloned().collect();
-            self.had = alive;
-            if helpers {
-                self.helpers(h, &s, &live, &accts, now).await;
+                    .ok()
+                    .flatten();
+            // Unreadable process list: unknown, not "all exited"; keep `had` for the next poll.
+            if let Some(live) = live {
+                let alive: HashSet<String> = live.iter().map(|(_, t)| t.clone()).collect();
+                exited = self.had.difference(&alive).cloned().collect();
+                self.had = alive;
+                if helpers {
+                    self.helpers(h, &s, &live, &accts, now).await;
+                }
             }
         }
         self.n += 1;
@@ -636,8 +668,9 @@ impl Loop {
                         .and_then(|p| Cfg::from_value(&json!({ "placeId": p }), 0).place_id);
                 }
                 let acct = find(&account);
-                // A friend disconnected it: never relaunch (cfg off clears any pending).
-                if acct.is_some_and(|a| a.3) {
+                // A friend disconnected it, or another computer runs it: never relaunch (cfg
+                // off clears any pending, so no countdown is promised).
+                if acct.is_some_and(|a| a.3 || auto.handed_over(&a.1)) {
                     cfg.enabled = false;
                 }
                 let up = if use_presence {
@@ -1238,9 +1271,9 @@ mod tests {
         fn open_uri(&self, _: &str) -> std::io::Result<()> {
             panic!("no real launches in tests")
         }
-        fn tracked_clients(&self, t: &[String]) -> Vec<(u32, String)> {
+        fn tracked_clients(&self, t: &[String]) -> Option<Vec<(u32, String)>> {
             let l = self.live.lock().unwrap();
-            l.iter().filter(|c| t.contains(&c.1)).cloned().collect()
+            Some(l.iter().filter(|c| t.contains(&c.1)).cloned().collect())
         }
         fn close_pid(&self, pid: u32, t: &str) -> std::io::Result<bool> {
             self.closed.lock().unwrap().push(t.into());
@@ -1351,6 +1384,23 @@ mod tests {
         assert!(poll(&mut l, &h, true).await.is_empty());
         assert_ne!(pending(&h, "Alice"), Value::Null);
         pause(&h, "A");
+        for _ in 0..14 {
+            assert!(poll(&mut l, &h, true).await.is_empty());
+        }
+        assert_eq!(pending(&h, "Alice"), Value::Null);
+    }
+
+    /// Handed to another computer: no countdown is promised (none pending), none launched.
+    #[tokio::test(start_paused = true)]
+    async fn handed_over_account_gets_no_countdown() {
+        let d = tempfile::tempdir().unwrap();
+        let (h, p) = fixture(d.path());
+        let mut l = Loop::default();
+        arm(&h, "Alice", 60);
+        p.set(&[(1, TA)]);
+        poll(&mut l, &h, true).await;
+        h.0.automation.hand_over(&["A".into()]);
+        p.set(&[]);
         for _ in 0..14 {
             assert!(poll(&mut l, &h, true).await.is_empty());
         }

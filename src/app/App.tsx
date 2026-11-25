@@ -15,7 +15,7 @@ import { ACTIVITY_EVENT, call, inTauri, onEvent, TRAY_HINT, VAULT_LOCKED_EVENT }
 import { logError } from "@/lib/report";
 import { t } from "@/lib/i18n";
 import { Shell, useApplyAppearance } from "./Shell";
-import { useUi } from "./store";
+import { keyLetter, useUi } from "./store";
 import { TitleBar } from "./TitleBar";
 import { useSettings } from "./useSettings";
 import { useStateSync } from "./useStateSync";
@@ -87,12 +87,15 @@ export function App() {
     autoLeft.current = v.exists && !v.unlocked && (v.mode === "os" || v.rememberActive);
   }
 
-  // Locked: drop account data from the cache (any lock path: event, command, shortcut).
+  // Locked: drop account data from the cache (any lock path: event, command, shortcut), and
+  // what Rust hides while locked (Run here / Run on: paired computers and where accounts run).
   useEffect(() => {
     if (unlocked) return;
     qc.removeQueries({
       predicate: (q) =>
-        ["accounts", "avatar_full", "tool", "pin", "outfits"].includes(String(q.queryKey[0])),
+        ["accounts", "avatar_full", "tool", "pin", "outfits", "elsewhere", "targets"].includes(
+          String(q.queryKey[0]),
+        ),
     });
   }, [qc, unlocked]);
 
@@ -122,7 +125,7 @@ export function App() {
     if (!unlocked) return;
     let last = Date.now();
     const onActivity = (e: Event) => {
-      if (e instanceof KeyboardEvent && e.key.toLowerCase() === "l" && (e.ctrlKey || e.metaKey)) {
+      if (e instanceof KeyboardEvent && keyLetter(e) === "l" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         void lock();
         return;

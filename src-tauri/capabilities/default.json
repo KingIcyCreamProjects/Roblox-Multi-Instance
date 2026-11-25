@@ -129,6 +129,8 @@
     "allow-remote-forget",
     "allow-remote-elsewhere",
     "allow-remote-run-here",
+    "allow-remote-targets",
+    "allow-remote-send",
     "allow-homelab-latest",
     "allow-homelab-download",
     "allow-tool-block",

@@ -70,10 +70,11 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
-      # Windows builds MSI + NSIS, macOS a universal DMG, Linux AppImage + deb
+      # Windows builds MSI + NSIS, macOS a universal DMG, Linux AppImage + deb + rpm
       # (bundle.targets = "all"). latest.json is uploaded when
       # bundle.createUpdaterArtifacts is true and the signing secrets are set.
-      - uses: tauri-apps/tauri-action@v0
+      # Pinned by commit: this step sees the updater signing key.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2 (the commit, not the v0 tag object)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

@@ -157,6 +157,29 @@ test("a settings/games failure offers Try again, back to the kept preview", asyn
   }
 });
 
+test("Esc mid-step keeps the sheet open and says why; the step result still lands", async () => {
+  mockImport.encoding = "dpapi";
+  const orig = mock.mockCall;
+  let release = () => {};
+  const spy = vi
+    .spyOn(mock, "mockCall")
+    .mockImplementation((cmd, args) =>
+      cmd === "import_detect"
+        ? new Promise((r) => (release = () => r(orig(cmd, args))))
+        : orig(cmd, args),
+    );
+  const user = setup();
+  await user.type(screen.getByLabelText(t("imp.folder")), "C:\\old");
+  await user.click(screen.getByRole("button", { name: t("imp.look") }));
+  await user.keyboard("{Escape}");
+  expect(await screen.findByText(t("imp.busy"))).toBeInTheDocument();
+  expect(useUi.getState().importOpen).toBe(true);
+  release();
+  expect(await screen.findByText(t("imp.enc.dpapi"))).toBeInTheDocument();
+  expect(screen.queryByText(t("imp.busy"))).toBeNull();
+  spy.mockRestore();
+});
+
 test("one ticked account labels the import button for one", async () => {
   mockImport.encoding = "plain";
   const user = setup();

@@ -3,12 +3,21 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { useUi } from "@/app/store";
 import { t } from "@/lib/i18n";
+import * as ipc from "@/lib/ipc";
 import { ACTIVITY_EVENT } from "@/lib/ipc";
 import { mockRemote, mockVault, resetVaultMock } from "@/lib/mock";
 import { DevicesPage } from "./DevicesPage";
 import { loadViewer } from "./viewer";
 
 vi.mock("./viewer", () => ({ loadViewer: vi.fn() }));
+// the app's view (outside Tauri the session opens no socket); one test turns it off
+const env = vi.hoisted(() => ({ tauri: true }));
+vi.mock("@/lib/ipc", async (orig) => ({
+  ...(await orig<typeof import("@/lib/ipc")>()),
+  get inTauri() {
+    return env.tauri;
+  },
+}));
 
 const open = vi.fn();
 const close = vi.fn();
@@ -76,7 +85,7 @@ test("pairs with a code, then offers to connect right away", async () => {
   const done = await screen.findByRole("dialog", {
     name: t("dev.pairedTitle", { name: "Laptop" }),
   });
-  expect(mockVault.lastArgs.remote_pair).toEqual({ ip: "100.64.0.12", code: "k7mp 4xq2" });
+  expect(mockVault.lastArgs.remote_pair).toEqual({ ip: "100.64.0.12", code: "K7MP4XQ2" });
   await user.click(within(done).getByRole("button", { name: t("dev.connect") }));
   const o = await opened();
   expect(o.url).toBe("ws://100.64.0.12:7813/v1/remote/ws");
@@ -100,6 +109,59 @@ test("Done closes the paired sheet; the row can connect", async () => {
   expect(
     await within(await row("Laptop")).findByRole("button", connectBtn("Laptop")),
   ).toBeInTheDocument();
+});
+
+test("a code one character short can't be sent, even with its space", async () => {
+  const user = userEvent.setup();
+  setup();
+  await user.click(within(await row("Laptop")).getByRole("button", pairBtn("Laptop")));
+  const dialog = await screen.findByRole("dialog");
+  const box = within(dialog).getByRole("textbox", { name: t("dev.code") });
+  await user.type(box, "ABCD 234");
+  expect(within(dialog).getByRole("button", { name: t("dev.pair") })).toBeDisabled();
+  await user.type(box, "5");
+  expect(within(dialog).getByRole("button", { name: t("dev.pair") })).toBeEnabled();
+});
+
+test("a failed connect says why and Connect works again", async () => {
+  const user = userEvent.setup();
+  const orig = ipc.call;
+  const spy = vi
+    .spyOn(ipc, "call")
+    .mockImplementation((cmd, args) =>
+      cmd === "remote_connect"
+        ? Promise.reject(new Error("Den PC did not answer."))
+        : orig(cmd, args as never),
+    );
+  setup();
+  const btn = within(await row("Den PC")).getByRole("button", connectBtn("Den PC"));
+  await user.click(btn);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Den PC did not answer.");
+  await waitFor(() => expect(btn).toBeEnabled());
+  expect(open).not.toHaveBeenCalled();
+  spy.mockRestore();
+});
+
+test("a failed remove says why, keeps the pairing and gives focus back to Remove", async () => {
+  const user = userEvent.setup();
+  const orig = ipc.call;
+  const spy = vi
+    .spyOn(ipc, "call")
+    .mockImplementation((cmd, args) =>
+      cmd === "remote_forget"
+        ? Promise.reject(new Error("Could not save."))
+        : orig(cmd, args as never),
+    );
+  setup();
+  const remove = { name: t("dev.removeNamed", { name: "Den PC" }) };
+  await user.click(within(await row("Den PC")).getByRole("button", remove));
+  // the question takes focus (Cancel), not the page body
+  expect(screen.getByRole("button", { name: t("set.cancel") })).toHaveFocus();
+  await user.click(screen.getByRole("button", { name: t("dev.remove") }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not save.");
+  await waitFor(() => expect(screen.getByRole("button", remove)).toHaveFocus());
+  expect(within(await row("Den PC")).getByRole("button", connectBtn("Den PC"))).toBeInTheDocument();
+  spy.mockRestore();
 });
 
 test("a wrong code stays in the dialog with the reason", async () => {
@@ -180,7 +242,16 @@ test("pairing removed on the other computer: token dropped, Pair again", async (
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-test("a watched session counts as activity for the idle auto-lock", async () => {
+test("a watched session counts as activity for the idle auto-lock, an ended one does not", async () => {
+  // the viewer's status dot: "ok" live, "warn" connected but no picture, "bad" ended or failed
+  let dot: HTMLElement | null = null;
+  open.mockImplementation(({ mount }: { mount: HTMLElement }) => {
+    dot = document.createElement("i");
+    dot.className = "rv-dot";
+    dot.dataset.tone = "ok";
+    mount.append(dot);
+    return { close };
+  });
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -191,14 +262,50 @@ test("a watched session counts as activity for the idle auto-lock", async () => 
     window.addEventListener(ACTIVITY_EVENT, onActivity);
     vi.advanceTimersByTime(60_000);
     expect(onActivity).toHaveBeenCalledTimes(3);
+    // ended or failed (overlay still open): the normal idle timer applies again
+    dot!.dataset.tone = "bad";
+    vi.advanceTimersByTime(60_000);
+    expect(onActivity).toHaveBeenCalledTimes(3);
+    // still connected on the other computer's lock screen: someone may be watching
+    dot!.dataset.tone = "warn";
+    vi.advanceTimersByTime(20_000);
+    expect(onActivity).toHaveBeenCalledTimes(4);
     o.onClose();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     vi.advanceTimersByTime(60_000);
     window.removeEventListener(ACTIVITY_EVENT, onActivity);
-    expect(onActivity).toHaveBeenCalledTimes(3);
+    expect(onActivity).toHaveBeenCalledTimes(4);
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("the browser preview opens no socket: it says so, Close works", async () => {
+  env.tauri = false;
+  vi.mocked(loadViewer).mockClear();
+  try {
+    const user = userEvent.setup();
+    setup();
+    await user.click(within(await row("Den PC")).getByRole("button", connectBtn("Den PC")));
+    expect(await screen.findByRole("alert")).toHaveTextContent(t("dev.previewOnly"));
+    expect(loadViewer).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: t("sheet.close") }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  } finally {
+    env.tauri = true;
+  }
+});
+
+test("the page unmounting (the vault locked) ends the session", async () => {
+  const user = userEvent.setup();
+  const { unmount } = setup();
+  await user.click(within(await row("Den PC")).getByRole("button", connectBtn("Den PC")));
+  await opened();
+  expect(useUi.getState().remoteOpen).toBe(true);
+  unmount();
+  expect(close).toHaveBeenCalled();
+  expect(useUi.getState().remoteOpen).toBe(false);
 });
 
 test("a build without the viewer says so", async () => {

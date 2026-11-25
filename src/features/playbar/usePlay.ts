@@ -163,10 +163,17 @@ export const play: Play = (ids, opts) => {
   // one batch at a time, whatever the entry point (row, keyboard, menus, inspector, Play bar,
   // hero, tray); checked before any side effect
   if (launchBusy()) return void toast(t("launch.busy"));
-  saveLaunchSet(ids); // Home's hero Play reads it
-  if (opts?.dest !== undefined) usePlayBar.getState().setDestination(opts.dest);
-  if (opts?.mode) usePlayBar.setState({ mode: opts.mode, server: opts.server ?? "" });
-  const { destination, server, mode } = usePlayBar.getState();
+  // only "not signed in yet" accounts: Rust would fail each one (same words as the Play bar)
+  const known = queryClient.getQueryData<AccountsList>(KEY)?.accounts;
+  if (known && ids.every((id) => known.find((a) => a.id === id)?.session === "pending"))
+    return void toast(t("session.pendingLong"));
+  // the bar values this play uses; written to the bar (and the last set) only once Rust
+  // accepts the batch, so a refused start changes nothing
+  const cur = usePlayBar.getState();
+  const fresh = opts?.dest !== undefined;
+  const destination = fresh ? opts.dest! : cur.destination;
+  const mode = opts?.mode ?? (fresh ? "any" : cur.mode);
+  const server = opts?.mode ? (opts.server ?? "") : fresh ? "" : cur.server;
   const mine: Batch = { id: null, ids, done: null };
   useLaunch.setState({ batch: mine, focus: !!opts?.focus });
   const isMine = (b: Batch | null) => !!b && !b.id && b.ids === ids;
@@ -177,6 +184,9 @@ export const play: Play = (ids, opts) => {
     useBarForAll: !!opts?.here || !!destination.trim(),
   }).then(
     ({ batchId }) => {
+      saveLaunchSet(ids); // Home's hero Play reads it
+      if (fresh) usePlayBar.getState().setDestination(destination);
+      if (opts?.mode) usePlayBar.setState({ mode, server });
       const b = useLaunch.getState().batch;
       if (!isMine(b)) return;
       if (b!.cancel) cancelId(batchId);

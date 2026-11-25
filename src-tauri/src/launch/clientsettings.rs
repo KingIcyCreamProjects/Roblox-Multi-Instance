@@ -47,22 +47,14 @@ pub fn write_fps(version_dir: &Path, fps: Option<u32>, custom: Option<&Value>) -
     cur.remove(FPS_FLAG);
     // Keys merged from the custom file last time go first, so a flag removed from it (or
     // the whole file cleared) leaves Roblox's file too, or gets back the user's own value
-    // it overwrote. Stored as key -> that value (null: there was none); older versions
-    // stored a plain key list.
+    // it overwrote, unless the user changed it since RMI wrote it.
     let keys_path = dir.join(MERGED_KEYS);
-    let prev: Map<String, Value> = match std::fs::read(&keys_path)
-        .map_err(|_| ())
-        .and_then(|b| serde_json::from_slice(&b).map_err(|_| ()))
-    {
-        Ok(Value::Object(p)) => p,
-        Ok(Value::Array(p)) => p
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|k| (k.to_owned(), Value::Null))
-            .collect(),
-        _ => Map::new(),
-    };
+    let (prev, wrote) = read_keys(&keys_path)?;
     for (k, v) in &prev {
+        let disk = orig.as_ref().and_then(|m| m.get(k));
+        if wrote.as_ref().is_some_and(|w| disk != w.get(k)) {
+            continue;
+        }
         match v {
             Value::Null => cur.remove(k),
             v => cur.insert(k.clone(), v.clone()),
@@ -83,18 +75,73 @@ pub fn write_fps(version_dir: &Path, fps: Option<u32>, custom: Option<&Value>) -
     if let Some(f) = fps {
         cur.insert(FPS_FLAG.into(), f.into());
     }
+    let now: Map<String, Value> = merged
+        .keys()
+        .map(|k| (k.clone(), cur.get(k).cloned().unwrap_or(Value::Null)))
+        .collect();
     // Nothing changes: no write (macOS blocks writes into the signed Roblox.app bundle).
-    if orig.as_ref() == Some(&cur) && prev == merged {
+    if orig.as_ref() == Some(&cur) && prev == merged && wrote.as_ref() == Some(&now) {
         return Ok(());
     }
     std::fs::create_dir_all(&dir)?;
+    // The restore record goes first, holding the old entries too: a failure from here on
+    // still knows the user's values.
+    let mut pre = merged.clone();
+    pre.extend(prev.clone());
+    let pre_w = wrote.clone().map(|w| {
+        let mut m = now.clone();
+        m.extend(w);
+        m
+    });
+    if (&pre, &pre_w) != (&prev, &wrote) {
+        crate::settings::save(&keys_path, &keys_json(pre, pre_w))?;
+    }
     crate::settings::save(&path, &Value::Object(cur))?;
-    crate::settings::save(&keys_path, &Value::Object(merged))
+    crate::settings::save(&keys_path, &keys_json(merged, Some(now)))
 }
 
-/// Next to `ClientAppSettings.json`: the custom keys RMI merged last, each with the value
-/// it replaced.
+/// Next to `ClientAppSettings.json`: `{"orig": custom key -> the value it replaced (null:
+/// none), "wrote": key -> the value RMI wrote}`. Older versions stored the orig map alone, or
+/// a plain key list; what RMI wrote is then unknown (`None`) and restored unconditionally.
 const MERGED_KEYS: &str = "RMIMergedKeys.json";
+
+type Keys = (Map<String, Value>, Option<Map<String, Value>>);
+
+/// Missing = nothing merged. Unreadable or invalid is an error, never "empty": that would
+/// leave merged flags in Roblox's file as if they were the user's.
+fn read_keys(path: &Path) -> io::Result<Keys> {
+    let b = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Map::new(), Some(Map::new()))),
+        Err(e) => return Err(e),
+    };
+    let v: Value = serde_json::from_slice(&b).map_err(io::Error::other)?;
+    if let (Some(Value::Object(o)), Some(Value::Object(w)), Some(2)) =
+        (v.get("orig"), v.get("wrote"), v.as_object().map(Map::len))
+    {
+        return Ok((o.clone(), Some(w.clone())));
+    }
+    match v {
+        Value::Object(p) => Ok((p, None)),
+        Value::Array(p) => Ok((
+            p.iter()
+                .filter_map(Value::as_str)
+                .map(|k| (k.to_owned(), Value::Null))
+                .collect(),
+            None,
+        )),
+        _ => Err(io::Error::other(format!(
+            "{MERGED_KEYS} is not a JSON object"
+        ))),
+    }
+}
+
+fn keys_json(orig: Map<String, Value>, wrote: Option<Map<String, Value>>) -> Value {
+    match wrote {
+        Some(w) => serde_json::json!({ "orig": orig, "wrote": w }),
+        None => Value::Object(orig),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -185,6 +232,22 @@ mod tests {
         std::fs::write(&keys, r#"["Y"]"#).unwrap();
         write_fps(d.path(), None, None).unwrap();
         assert_eq!(read(d.path()), json!({ "X": true }));
+    }
+
+    #[test]
+    fn user_edit_after_override_is_kept_and_bad_record_stops() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(file(d.path()).parent().unwrap()).unwrap();
+        std::fs::write(file(d.path()), r#"{"X":"A"}"#).unwrap();
+        write_fps(d.path(), None, Some(&json!({ "X": "B" }))).unwrap();
+        std::fs::write(file(d.path()), r#"{"X":"C"}"#).unwrap();
+        write_fps(d.path(), None, None).unwrap();
+        assert_eq!(read(d.path()), json!({ "X": "C" }));
+        // an unreadable record is not "nothing merged": Roblox's file is left alone
+        let keys = d.path().join("ClientSettings").join(MERGED_KEYS);
+        std::fs::write(&keys, "{bad").unwrap();
+        assert!(write_fps(d.path(), None, Some(&json!({ "X": "D" }))).is_err());
+        assert_eq!(read(d.path()), json!({ "X": "C" }));
     }
 
     #[test]

@@ -4,7 +4,7 @@ Thanks for wanting to help. Anything goes: bug fixes, features, UI polish, docs,
 
 ## Setup
 
-You need Windows 10/11, macOS or Linux, Rust stable (MSVC toolchain on Windows), Node 22+ and pnpm through corepack. On Linux also install the Tauri system packages listed in `.github/workflows/release.yml`.
+You need Windows 10/11, macOS or Linux, Rust 1.99.1, the version CI pins (MSVC toolchain on Windows), Node 22+ and pnpm through corepack. On Linux also install the Tauri system packages listed in `.github/workflows/release.yml`.
 
 ```bash
 git clone https://github.com/KingIcyCreamProjects/Roblox-Multi-Instance.git
@@ -41,12 +41,12 @@ cargo test
 ## A few rules
 
 - Never commit secrets: cookies, tokens, the updater signing key, real account names in screenshots.
-- New Tauri commands need an entry in `src-tauri/capabilities/default.json` and `build.rs`; `src/lib/acl.test.ts` fails if you forget.
+- New Tauri commands need an entry in `src-tauri/capabilities/default.json` and `build.rs`. `src/lib/acl.test.ts` fails when a command in `src/lib/ipc.ts` has no capability entry; it does not read `build.rs`, so a missing `build.rs` entry shows up as a Rust build error about an unknown permission.
 - User-facing text goes in `src/lib/i18n.ts`. Keep it short and plain.
 - Anything that shows an account name in the UI needs `data-pii` so privacy mode can blur it.
 
 ## Reporting bugs
 
-Open an issue with what you did, what you expected, what happened, your Windows version, and the RMI log from `%APPDATA%\Roblox Multi Instance\logs` (cookies and tokens are redacted, but read it before you post).
+Open an issue with what you did, what you expected, what happened, your OS and version, and the RMI log from the `logs` folder in the data folder: `%APPDATA%\Roblox Multi Instance` on Windows, `~/Library/Application Support/Roblox Multi Instance` on macOS, `~/.local/share/Roblox Multi Instance` on Linux. Cookies and tokens are redacted, but account names can appear, so read it before you post.
 
 By contributing you agree your work is released under the [MIT License](LICENSE).

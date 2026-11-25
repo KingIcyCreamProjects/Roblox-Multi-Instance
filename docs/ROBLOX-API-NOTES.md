@@ -50,7 +50,7 @@ Checked 2026-10-24 without a cookie. "Route exists" = 401 `Authentication token 
 | `POST avatar.roblox.com/v1/avatar/set-body-colors`, `set-scales`, `set-player-avatar-type`; `POST avatar.roblox.com/v2/avatar/set-wearing-assets` `{assets:[{id}]}` | routes exist (v1 `set-wearing-assets` is 404). Reply assumed `{invalidAssetIds, success}`; unowned assets show up in `invalidAssetIds` (unverified). Steps run colors → scales → type → assets with no rollback; a failure part-way leaves earlier steps applied. Null `bodyColors`/`scale` are skipped |
 | `GET thumbnails.roblox.com/v1/users/outfits?userOutfitIds=` | assumed same shape as other thumbnails (unverified) |
 | `GET/POST auth.roblox.com/v1/account/pin`, `/v1/account/pin/unlock` `{pin}` | routes exist. Reply assumed `{isEnabled, unlockedUntil}`, `unlockedUntil` read as seconds left (epoch s if > 1e9, epoch ms if > 1e12) |
-| PIN-locked write | assumed 403 with "PIN" in the error message → `PIN_REQUIRED` (unverified) |
+| PIN-locked write | assumed 400 or 403 with "PIN" in the error message → `PIN_REQUIRED` (unverified) |
 | `PATCH users.roblox.com/v1/users/{id}/display-names` `{newDisplayName}` | route exists; Roblox's error message is shown as is (cooldowns) |
 | `POST auth.roblox.com/v2/user/passwords/change` `{currentPassword, newPassword}` | route exists; a rotated `.ROBLOSECURITY` in `Set-Cookie` is stored |
 | `GET/POST accountsettings.roblox.com/v1/email` (`{emailAddress, verified}` / `{password, emailAddress}`) | routes exist |
@@ -59,3 +59,13 @@ Checked 2026-10-24 without a cookie. "Route exists" = 401 `Authentication token 
 | `POST friends.roblox.com/v1/users/{id}/request-friendship` `{friendshipOriginSourceType:"Unknown"}` | route exists; reply `{success, isCaptchaRequired}` assumed |
 | Blocks | `accountsettings …/block` and `get-detailed-blocked-users` are **404 now**. Uses `POST apis.roblox.com/user-blocking-api/v1/users/{id}/block-user` / `unblock-user` and `GET …/v1/users/get-blocked-users?count=50&cursor=` (routes exist). List shape **unverified**, read leniently (`data.blockedUserIds` or id objects) |
 | `GET economy.roblox.com/v1/users/{id}/currency` | route exists; `{robux}` assumed |
+
+## Quick Log In (friend page "add account", `roblox/api/quicklogin.rs`)
+
+| Call | Status |
+|---|---|
+| `POST apis.roblox.com/auth-token-service/v1/login/create` `{}` (no auth) | verified: `{code, privateKey, expirationTime}` |
+| `POST apis.roblox.com/auth-token-service/v1/login/status` `{code, privateKey}` | verified: `{status: "Created" \| "UserLinked" \| "Validated" \| "Cancelled", accountName}` |
+| `POST apis.roblox.com/auth-token-service/v1/login/cancel` `{code}` | route used; reply ignored (unverified) |
+| `POST auth.roblox.com/v2/login` `{ctype: "AuthToken", cvalue: code, password: privateKey}` | assumed 200 + `Set-Cookie: .ROBLOSECURITY` (unverified); a 403 with `rblx-challenge-*` means an extra check (2-step verification) |
+| `POST auth.roblox.com/v2/logout` (cookie, CSRF handshake) | best effort; reply ignored (unverified) |

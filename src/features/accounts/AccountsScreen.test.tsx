@@ -1,6 +1,6 @@
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useUi } from "@/app/store";
 import { Toaster, useToasts } from "@/components/Toasts";
@@ -59,6 +59,8 @@ test("arrows select, Delete removes with an undo toast, Undo restores", async ()
 
   await user.keyboard("{Delete}");
   await waitFor(() => expect(screen.queryByText("Pylon")).toBeNull());
+  // the cursor lands on the next row, not back at the top
+  expect(useUi.getState().sel).toMatchObject({ ids: ["acc-1"], cursor: "acc-1" });
   const status = screen.getByRole("status", { name: t("toast.region") });
   expect(await within(status).findByText(t("accounts.removed1"))).toBeInTheDocument();
   await user.click(within(status).getByRole("button", { name: t("accounts.undo") }));
@@ -167,6 +169,41 @@ test("Delete ignores selected accounts a search has hidden", async () => {
   await user.keyboard("{Enter}");
   await new Promise((r) => setTimeout(r, 50));
   expect(mockVault.lastArgs.launch_start).toBeUndefined();
+});
+
+test("text dropped while a paste is being added is kept after what is left", async () => {
+  const orig = ipc.call;
+  let release = () => {};
+  vi.spyOn(ipc, "call").mockImplementation((cmd, args) =>
+    cmd === "accounts_add_cookies"
+      ? new Promise((r) => (release = () => void orig(cmd, args as never).then(r as never)))
+      : orig(cmd, args as never),
+  );
+  const user = userEvent.setup();
+  setup();
+  await user.click(await screen.findByRole("button", { name: t("accounts.add") }));
+  await user.click(await screen.findByRole("tab", { name: t("add.tab.cookies") }));
+  const box = await screen.findByLabelText(t("add.cookies.body"));
+  await user.type(box, "_|WARNING:abc|_A{Enter}bad line");
+  await user.click(
+    within(box.closest("[role=tabpanel]") as HTMLElement).getByRole("button", {
+      name: t("add.cta"),
+    }),
+  );
+  act(() => useUi.getState().openAdd("cookies", "_|WARNING:def|_B"));
+  await act(async () => release());
+  // the added line left, the rejected one stays, the dropped text follows it
+  await waitFor(() => expect(box).toHaveValue("bad line\n_|WARNING:def|_B"));
+  vi.restoreAllMocks();
+});
+
+test("typing a search drops the selected accounts it hides", async () => {
+  const user = userEvent.setup();
+  setup();
+  await screen.findByRole("grid", { name: t("accounts.listLabel") });
+  useUi.getState().setSel({ ids: ["acc-1", "acc-3"], anchor: "acc-1", cursor: "acc-1" });
+  await user.type(screen.getByRole("searchbox", { name: t("accounts.search") }), "pylon");
+  expect(useUi.getState().sel.ids).toEqual(["acc-3"]);
 });
 
 test("sign in with Save password ticked needs a password", async () => {

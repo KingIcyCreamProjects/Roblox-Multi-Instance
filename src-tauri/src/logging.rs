@@ -1,11 +1,11 @@
 use regex::Regex;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, PoisonError, RwLock};
 
 static COOKIE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)_(?:\||%7c)WARNING(?::|%3a)[^\s;"',]+"#).unwrap());
 static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?i)\b(cookie|set-cookie|x-csrf-token|authorization)(["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\r\n]+)"#,
+        r#"(?i)(\.roblosecurity|\b(?:cookie|set-cookie|x-csrf-token|authorization))(["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\r\n]+)"#,
     )
     .unwrap()
 });
@@ -22,7 +22,9 @@ static HOME: LazyLock<Option<Regex>> = LazyLock::new(|| {
 fn home_re(h: &str) -> Regex {
     let ci = if cfg!(windows) { "(?i)" } else { "" };
     let (esc, plain) = (regex::escape(&h.replace('\\', "\\\\")), regex::escape(h));
-    Regex::new(&format!(r"{ci}(?:{esc}|{plain})(\W|$)")).unwrap()
+    // `C:/Users/x` (URLs, webview errors) too.
+    let fwd = regex::escape(&h.replace('\\', "/"));
+    Regex::new(&format!(r"{ci}(?:{esc}|{plain}|{fwd})(\W|$)")).unwrap()
 }
 
 const MASK: &str = "[REDACTED]";
@@ -30,7 +32,10 @@ const MASK: &str = "[REDACTED]";
 /// Add a runtime secret (e.g. the local API token) that must never reach a log line.
 pub fn register_secret(s: &str) {
     if !s.is_empty() {
-        SECRETS.write().unwrap().push(s.to_owned());
+        SECRETS
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(s.to_owned());
     }
 }
 
@@ -39,7 +44,12 @@ pub fn redact(input: &str) -> String {
         .replace_all(input, format!("$1$2{MASK}"))
         .into_owned();
     out = COOKIE.replace_all(&out, MASK).into_owned();
-    for s in SECRETS.read().unwrap().iter() {
+    // Runs in the panic hook: a poisoned lock must not abort before crash.log is written.
+    for s in SECRETS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+    {
         out = out.replace(s.as_str(), MASK);
     }
     if let Some(h) = HOME.as_ref() {
@@ -163,6 +173,32 @@ mod tests {
             assert_eq!(m(r"c:\users\al\x"), r"~\x");
             assert_eq!(m(r#""C:\\USERS\\AL\\x""#), r#""~\\x""#);
             assert_eq!(m(r"C:\Users\Alex\x"), r"C:\Users\Alex\x");
+        }
+    }
+
+    #[test]
+    fn poisoned_secrets_still_redact() {
+        let _ = std::thread::spawn(|| {
+            let _g = SECRETS.write().unwrap_or_else(PoisonError::into_inner);
+            panic!("poison");
+        })
+        .join();
+        register_secret("pz7k");
+        assert_eq!(redact("a pz7k b"), format!("a {MASK} b"));
+    }
+
+    #[test]
+    fn masks_bare_roblosecurity_and_forward_slash_home() {
+        assert_eq!(
+            redact("bad .ROBLOSECURITY=abc"),
+            format!("bad .ROBLOSECURITY={MASK}")
+        );
+        if cfg!(windows) {
+            let re = home_re(r"C:\Users\Al");
+            assert_eq!(
+                re.replace_all("file:///C:/Users/Al/x", "~$1"),
+                "file:///~/x"
+            );
         }
     }
 

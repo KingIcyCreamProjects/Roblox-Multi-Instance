@@ -1,11 +1,13 @@
 import * as Dialog from "@radix-ui/react-dialog";
+import * as Toggle from "@radix-ui/react-toggle-group";
 import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
-import { Eye, Grid2X2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { Eye, Grid2X2, X } from "lucide-react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { toast } from "@/components/Toasts";
 import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
+import { SCRIM, useModalFocus } from "@/components/ui/Sheet";
 import { useSetSettings, useSettings } from "@/app/useSettings";
 import { Avatar } from "@/features/accounts/AccountRow";
 import { label } from "@/features/accounts/model";
@@ -18,7 +20,7 @@ import {
   type GridLayout,
 } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
-import { sameLayout, tiles, togglePick } from "./model";
+import { layoutLabel, sameLayout, tiles, togglePick } from "./model";
 
 const role = (i: number) => (i === 0 ? t("grid.main") : t("grid.alt", { n: i }));
 
@@ -56,7 +58,7 @@ function PickOrder({
                 aria-pressed={on}
                 onClick={() => setOrder((o) => togglePick(o, a.id))}
                 className={clsx(
-                  "flex h-[52px] w-full items-center gap-3 rounded-[10px] px-3.5 text-left transition-colors duration-[var(--dur-quick)]",
+                  "flex h-13 w-full items-center gap-3 rounded-panel px-3.5 text-left transition-colors duration-[var(--dur-quick)]",
                   on ? "bg-surface-4" : "bg-surface-2 hover:bg-surface-3",
                 )}
               >
@@ -71,7 +73,7 @@ function PickOrder({
                   {on && (
                     <span
                       aria-hidden
-                      className="absolute -top-1.5 -right-1.5 grid size-[19px] place-items-center rounded-full bg-accent text-[11px] font-bold text-accent-ink tnum ring-2 ring-surface-4"
+                      className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full bg-accent text-12 font-bold text-accent-ink tnum ring-2 ring-surface-4"
                     >
                       {i + 1}
                     </span>
@@ -110,7 +112,7 @@ function Thumb({ layout, n }: { layout: GridLayout; n: number }) {
   return (
     <div
       aria-hidden
-      className="relative h-[140px] overflow-hidden rounded-[8px] bg-[rgb(40_42_50)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.08)]"
+      className="relative h-35 overflow-hidden rounded-control bg-[rgb(40_42_50)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.08)]"
     >
       <div className="absolute inset-1.5">
         {tiles(layout, n).map((k) => {
@@ -129,7 +131,7 @@ function Thumb({ layout, n }: { layout: GridLayout; n: number }) {
             >
               <div
                 className={clsx(
-                  "flex size-full items-center justify-center overflow-hidden rounded-[4px] leading-[1.15] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.2)]",
+                  "flex size-full items-center justify-center overflow-hidden rounded-chip leading-[1.15] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.2)]",
                   cas ? "items-start justify-start gap-1.5 px-1.5 py-[3px]" : "flex-col",
                   main
                     ? "bg-accent/30 shadow-[inset_0_0_0_1px_rgb(120_160_255/0.6)]"
@@ -140,19 +142,13 @@ function Thumb({ layout, n }: { layout: GridLayout; n: number }) {
                 <b
                   className={clsx(
                     "font-semibold text-on-image tnum",
-                    big ? "text-[30px]" : cas ? "text-[11px]" : "text-[15px]",
+                    big ? "text-28" : cas ? "text-12" : "text-14",
                   )}
                 >
                   {k.i + 1}
                 </b>
                 {n < 10 && (
-                  <span
-                    className={clsx(
-                      "text-on-image-2",
-                      big ? "text-[11.5px]" : "text-[9.5px]",
-                      cas && "pt-px",
-                    )}
-                  >
+                  <span className={clsx("text-on-image-2", "text-12", cas && "pt-px")}>
                     {role(k.i)}
                   </span>
                 )}
@@ -230,20 +226,20 @@ function PickLayout({
 
   return (
     <>
-      <div
-        role="radiogroup"
+      {/* Radix ToggleGroup: radio roles, one Tab stop, arrow keys (as ServerPick) */}
+      <Toggle.Root
+        type="single"
+        value={String(idx)}
+        onValueChange={(v) => v && setPicked(suggestions[Number(v)].layout)}
         aria-label={t("grid.layoutTitle")}
         className="grid grid-cols-3 gap-3.5"
       >
         {suggestions.map((s, i) => (
-          <button
+          <Toggle.Item
             key={s.label}
-            type="button"
-            role="radio"
-            aria-checked={i === idx}
-            onClick={() => setPicked(s.layout)}
+            value={String(i)}
             className={clsx(
-              "flex flex-col gap-3 rounded-[12px] px-3 pt-3 pb-3.5 text-left transition-colors duration-[var(--dur-quick)]",
+              "flex flex-col gap-3 rounded-panel px-3 pt-3 pb-3.5 text-left transition-colors duration-[var(--dur-quick)]",
               i === idx
                 ? "bg-surface-4 shadow-[inset_0_0_0_1.5px_var(--accent)]"
                 : "bg-surface-2 hover:bg-surface-3",
@@ -251,16 +247,16 @@ function PickLayout({
           >
             <Thumb layout={s.layout} n={count} />
             <span className="flex items-center justify-between px-0.5">
-              <span className="text-13 font-semibold text-text-1">{s.label}</span>
+              <span className="text-13 font-semibold text-text-1">{layoutLabel(s, count)}</span>
               {i === 0 && (
-                <span className="rounded-full bg-accent px-2.5 py-[3px] text-[11.5px] font-semibold text-accent-ink">
+                <span className="rounded-full bg-accent px-2.5 py-0.5 text-12 font-semibold text-accent-ink">
                   {t("grid.best")}
                 </span>
               )}
             </span>
-          </button>
+          </Toggle.Item>
         ))}
-      </div>
+      </Toggle.Root>
       {(suggestErr ?? monitorsErr) && (
         <p role="status" className="text-12 text-error">
           {errMessage(suggestErr ?? monitorsErr)}
@@ -268,27 +264,24 @@ function PickLayout({
       )}
       <div className="flex items-center gap-2.5">
         {several && (
-          <div
-            role="radiogroup"
+          // same segmented recipe as ServerPick
+          <Toggle.Root
+            type="single"
+            value={monitor ?? ""}
+            onValueChange={(v) => v && setMon(v)}
             aria-label={t("grid.monitor")}
-            className="flex gap-0.5 rounded-[9px] bg-surface-3 p-[3px]"
+            className="flex h-8 items-center rounded-control bg-surface-3 p-0.5"
           >
             {monitors.map((m) => (
-              <button
+              <Toggle.Item
                 key={m.id}
-                type="button"
-                role="radio"
-                aria-checked={m.id === monitor}
-                onClick={() => setMon(m.id)}
-                className={clsx(
-                  "h-[26px] rounded-[7px] px-3 text-12 font-semibold transition-colors duration-[var(--dur-quick)]",
-                  m.id === monitor ? "bg-surface-4 text-text-1" : "text-text-2 hover:text-text-1",
-                )}
+                value={m.id}
+                className="h-7 rounded-[calc(var(--radius-control)-2px)] px-3 text-12 font-semibold text-text-2 transition-colors duration-[var(--dur-quick)] hover:text-text-1 data-[state=on]:bg-surface-4 data-[state=on]:text-text-1"
               >
                 {m.label}
-              </button>
+              </Toggle.Item>
             ))}
-          </div>
+          </Toggle.Root>
         )}
         <span className="flex-1" />
         <IconButton label={t("grid.identify")} onClick={identify}>
@@ -311,11 +304,16 @@ function PickLayout({
 
 // ---- Popover ----
 
+/** One focus handler set per open (the loading shell and the wizard are separate Contents). */
+const Focus = createContext<ReturnType<typeof useModalFocus> | null>(null);
+
 function Shell({ wide, children }: { wide: boolean; children: ReactNode }) {
+  const focus = useContext(Focus);
   return (
     <Dialog.Content
-      style={{ width: `min(${wide ? 860 : 700}px, calc(100vw - 48px))` }}
-      className="glass fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-48px)] overflow-y-auto -translate-x-1/2 -translate-y-1/2 flex-col gap-[22px] rounded-[16px] p-7"
+      {...focus}
+      style={{ width: `min(${wide ? 53.75 : 43.75}rem, calc(100vw - 48px))` }}
+      className="glass fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-48px)] overflow-y-auto -translate-x-1/2 -translate-y-1/2 flex-col gap-5 rounded-panel p-6"
     >
       {children}
     </Dialog.Content>
@@ -380,7 +378,16 @@ function Wizard({
             )}
           </Dialog.Description>
         </div>
-        <span className="pt-1 text-12 text-text-3">{t("grid.step", { n: step })}</span>
+        <span className="flex items-start gap-3">
+          <span className="pt-1 text-12 text-text-3">{t("grid.step", { n: step })}</span>
+          {/* same close control as Sheet */}
+          <Dialog.Close
+            aria-label={t("sheet.close")}
+            className="-mt-1 -mr-2 inline-grid size-8 place-items-center rounded-control text-text-2 hover:bg-surface-3 hover:text-text-1"
+          >
+            <X size={16} strokeWidth={1.75} />
+          </Dialog.Close>
+        </span>
       </div>
       {step === 1 ? (
         <PickOrder
@@ -408,11 +415,14 @@ export function GridPopover({
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
+  const focus = useModalFocus();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="sheet-fade fixed inset-0 z-40 bg-[var(--scrim)]" />
-        <Body onClose={() => onOpenChange(false)} />
+        <Dialog.Overlay className={SCRIM} />
+        <Focus.Provider value={focus}>
+          <Body onClose={() => onOpenChange(false)} />
+        </Focus.Provider>
       </Dialog.Portal>
     </Dialog.Root>
   );

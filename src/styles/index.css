@@ -53,10 +53,17 @@
     background: transparent;
   }
   /* browser dev build: no acrylic, so fake the desktop behind the window */
-  :root:not([data-native]) body {
+  :root:not([data-native]):not([data-indicator]) body {
     background:
       radial-gradient(60% 50% at 20% 25%, oklch(0.62 0.16 145 / 0.8), transparent 70%),
       radial-gradient(55% 55% at 80% 70%, oklch(0.6 0.15 45 / 0.75), transparent 70%), #0b0c0f;
+  }
+  /* the "being controlled" bar is its own opaque window: a flat base under its translucent bg */
+  :root[data-indicator] body {
+    background: rgb(var(--p-graphite));
+  }
+  :root[data-indicator][data-theme="light"] body {
+    background: rgb(var(--p-paper));
   }
   html {
     font-size: calc(16px * var(--ui-scale, 1));
@@ -274,6 +281,40 @@ select:not([multiple]) {
 
 @utility tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* An open sheet or the palette (Radix modal) sets pointer-events: none on body, and its scrim
+   starts below the title bar: the frameless window still drags, minimizes, maximizes and closes,
+   while the tabs and app buttons stay blocked like the rest of the app. */
+body[style*="pointer-events: none"] .titlebar {
+  pointer-events: auto;
+}
+body[style*="pointer-events: none"] .titlebar button:not(.win-ctl button) {
+  pointer-events: none;
+}
+
+/* Home hero: the bottom scrim under the game title. Light theme puts dark text over the art, so its
+   scrim is taller and denser: the title stays readable over dark artwork. */
+.hero-scrim {
+  background: linear-gradient(
+    to top,
+    var(--bg) 0%,
+    color-mix(in oklch, var(--bg) 92%, transparent) 18%,
+    color-mix(in oklch, var(--bg) 70%, transparent) 40%,
+    color-mix(in oklch, var(--bg) 35%, transparent) 68%,
+    transparent 100%
+  );
+}
+:root[data-theme="light"] .hero-scrim {
+  height: 100%;
+  background: linear-gradient(
+    to top,
+    var(--bg) 0%,
+    color-mix(in oklch, var(--bg) 94%, transparent) 30%,
+    color-mix(in oklch, var(--bg) 85%, transparent) 55%,
+    color-mix(in oklch, var(--bg) 55%, transparent) 80%,
+    transparent 100%
+  );
 }
 
 /* Privacy mode: names and avatars blur (title-bar eye, Ctrl/Cmd+Shift+H). */

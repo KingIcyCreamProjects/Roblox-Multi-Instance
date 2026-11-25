@@ -45,10 +45,11 @@ export function PasswordField({ label, error, hint, showLabel, className, ...res
           aria-describedby={note ? `${id}-note` : undefined}
           className={clsx(
             "h-9 w-full rounded-control bg-field pr-10 pl-9 text-13 text-text-1 placeholder:text-text-3",
-            "transition-colors duration-[var(--dur-quick)] focus:shadow-[var(--focus-ring)] disabled:opacity-40",
+            "transition-colors duration-[var(--dur-quick)] disabled:opacity-40",
+            // the focus ring keeps the red error border
             error
-              ? "shadow-[inset_0_0_0_1px_var(--status-error)]"
-              : "shadow-[inset_0_0_0_1px_var(--hairline-strong)]",
+              ? "shadow-[inset_0_0_0_1px_var(--status-error)] focus:shadow-[inset_0_0_0_1px_var(--status-error),var(--focus-ring)]"
+              : "shadow-[inset_0_0_0_1px_var(--hairline-strong)] focus:shadow-[var(--focus-ring)]",
             className,
           )}
           {...rest}

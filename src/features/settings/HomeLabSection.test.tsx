@@ -8,7 +8,7 @@ import { HomeLabSection } from "./HomeLabSection";
 
 vi.mock("@/lib/events", async (orig) => ({
   ...(await orig<typeof import("@/lib/events")>()),
-  openExternal: vi.fn(),
+  openExternal: vi.fn(() => Promise.resolve()),
 }));
 
 beforeEach(() => {

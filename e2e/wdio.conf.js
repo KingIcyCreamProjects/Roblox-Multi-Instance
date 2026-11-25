@@ -67,7 +67,11 @@ export const config = {
     );
   },
 
-  afterSession: () => driver?.kill(),
+  // kill() ends only tauri-driver on Windows; /T also ends the msedgedriver and app it started
+  afterSession: () => {
+    if (driver?.exitCode === null)
+      spawnSync("taskkill", ["/PID", String(driver.pid), "/T", "/F"], { stdio: "ignore" });
+  },
 
   // keep the data dir of a failed run for its logs
   onComplete: (code) => {

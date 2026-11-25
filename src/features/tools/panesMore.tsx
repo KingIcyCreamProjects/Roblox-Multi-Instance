@@ -7,7 +7,7 @@ import { label } from "@/features/accounts/model";
 import { Outfits } from "@/features/discover/Outfits";
 import { copyText } from "@/features/discover/shared";
 import { call } from "@/lib/ipc";
-import { fmtInt, t } from "@/lib/i18n";
+import { fmtInt, LOCALE, t } from "@/lib/i18n";
 import { Field, Form, Go, ids, inp, USER } from "./panes";
 import { BatchView, Q, Status, useAction, useBatchAction, useTools, useToolQuery } from "./useTool";
 
@@ -50,6 +50,7 @@ export function Email() {
       <Field label={t("tools.email.new")} error={bad && t("tools.email.bad")}>
         <input
           className={inp}
+          data-pii
           type="email"
           autoComplete="off"
           spellCheck={false}
@@ -241,7 +242,12 @@ export function Blocks() {
   );
   const b = useBatchAction();
   const x = useAction();
-  const list = useToolQuery(["blocked", id], () => call("tool_blocked_list", { accountId: id }));
+  // the list only shows for one account: a batch never fetches it
+  const list = useToolQuery(
+    ["blocked", id],
+    () => call("tool_blocked_list", { accountId: id }),
+    !batch,
+  );
   const refresh = () => void qc.invalidateQueries({ queryKey: ["tool", "blocked", id] });
   const run = (name: string, block: boolean) =>
     b
@@ -429,7 +435,7 @@ export function Robux() {
         )}
       </Q>
       <Button disabled={q.isFetching} onClick={() => void q.refetch()}>
-        <RefreshCw size={14} strokeWidth={2} />
+        <RefreshCw size={14} strokeWidth={1.75} />
         {t("tools.rbx.refresh")}
       </Button>
     </div>
@@ -451,7 +457,7 @@ export function Info() {
               <dt className="text-text-3">{t("tools.info.age")}</dt>
               <dd className="text-text-1 tnum">{t("tools.info.days", { n: fmtInt(d.ageDays) })}</dd>
               <dt className="text-text-3">{t("tools.info.created")}</dt>
-              <dd className="text-text-1 tnum">{new Date(d.created).toLocaleDateString()}</dd>
+              <dd className="text-text-1 tnum">{new Date(d.created).toLocaleDateString(LOCALE)}</dd>
               <dt className="text-text-3">{t("tools.info.id")}</dt>
               <dd data-pii className="text-text-1 tnum">
                 {d.userId}
@@ -462,7 +468,7 @@ export function Info() {
               </dd>
             </dl>
             <div className="flex gap-2">
-              <Button onClick={() => void copyText(d.profileUrl, t("tools.info.profile"))}>
+              <Button onClick={() => void copyText(d.profileUrl, t("copy.profileLink"))}>
                 {t("tools.info.copy")}
               </Button>
               <Button onClick={() => void openExternal(d.profileUrl)}>

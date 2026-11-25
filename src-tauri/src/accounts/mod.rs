@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 pub const DEFAULT_GROUP: &str = "Unsorted";
 const ALIAS_MAX: usize = 50;
 const NOTE_MAX: usize = 5000;
+const EXTRA_MAX_BYTES: usize = 64 << 10;
 const GROUP_MAX: usize = 64;
 const GROUPS_MAX: usize = 200;
 
@@ -454,6 +455,16 @@ pub fn apply_patch(a: &mut Account, patch: &Value) -> Result<(), String> {
     }
     if n.graphics.is_some_and(|g| !(1..=10).contains(&g)) {
         return Err("Graphics level must be between 1 and 10.".into());
+    }
+    // Byte cap: the automation API can set it, and it lands in the vault and every backup.
+    if m.contains_key("extra")
+        && n.extra
+            .iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum::<usize>()
+            > EXTRA_MAX_BYTES
+    {
+        return Err("Extra fields are too large.".into());
     }
     // The owner took friend access away: a friend pause nobody can lift any more ends too.
     if !n.friend_allowed {
@@ -904,6 +915,12 @@ mod tests {
         assert!(apply_patch(&mut a, &json!({"fpsCap": 0})).is_err());
         assert!(apply_patch(&mut a, &json!({"fpsCap": 241})).is_err());
         assert!(apply_patch(&mut a, &json!({"graphics": 11})).is_err());
+        assert!(apply_patch(
+            &mut a,
+            &json!({"extra": {"k": "z".repeat(EXTRA_MAX_BYTES)}})
+        )
+        .is_err());
+        assert!(apply_patch(&mut a, &json!({"extra": {"k": "z"}})).is_ok());
         // an old cap above 240 doesn't block other edits
         a.fps_cap = Some(1000);
         assert!(apply_patch(&mut a, &json!({"note": "ok"})).is_ok());

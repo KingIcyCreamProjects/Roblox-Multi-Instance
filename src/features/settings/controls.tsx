@@ -58,19 +58,25 @@ export function Toggle({
   checked,
   disabled,
   onChange,
+  label,
+  describedBy,
 }: {
   id: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (v: boolean) => void;
+  /** outside a Row: its own name, and what describes it */
+  label?: string;
+  describedBy?: string;
 }) {
   return (
     <Switch.Root
       checked={checked}
       disabled={disabled}
       onCheckedChange={onChange}
-      aria-labelledby={`${id}-l`}
-      aria-describedby={`${id}-d ${id}-n`}
+      aria-label={label}
+      aria-labelledby={label ? undefined : `${id}-l`}
+      aria-describedby={describedBy ?? `${id}-d ${id}-n`}
       className={clsx(
         "h-5 w-9 shrink-0 rounded-full bg-[color-mix(in_oklab,var(--text-1)_35%,transparent)] p-0.5 transition-colors duration-[var(--dur-quick)]",
         "hover:bg-[color-mix(in_oklab,var(--text-1)_45%,transparent)] data-[state=checked]:bg-accent data-[state=checked]:hover:bg-accent-hover",
@@ -194,7 +200,8 @@ function TextCtl({
       aria-describedby={`${id}-d ${id}-n`}
       disabled={disabled}
       value={txt}
-      placeholder={item.placeholder}
+      data-pii={item.pii || undefined}
+      placeholder={item.placeholder && t(item.placeholder)}
       spellCheck={false}
       maxLength={item.max}
       onChange={(e) => {

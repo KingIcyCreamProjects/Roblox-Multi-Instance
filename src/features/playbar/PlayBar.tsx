@@ -502,7 +502,7 @@ function PlayOnce({
     <div
       role="dialog"
       aria-label={t("playbar.once")}
-      className="glass absolute right-7 bottom-[calc(100%+8px)] z-40 flex w-[360px] flex-col gap-3 rounded-panel p-4"
+      className="glass absolute right-7 bottom-[calc(100%+8px)] z-40 flex w-90 flex-col gap-3 rounded-panel p-4"
     >
       <label htmlFor={id} className="text-12 font-medium text-text-2">
         {t("playbar.once")}

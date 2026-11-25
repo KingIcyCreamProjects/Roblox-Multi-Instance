@@ -4,7 +4,7 @@
   "description": "The always-on-top \"being controlled\" bar: reads the session and stops it, nothing else.",
   "windows": ["remote-indicator"],
   "permissions": [
-    "core:event:default",
+    "log:default",
     "core:window:allow-start-dragging",
     "allow-remote-status",
     "allow-remote-stop"

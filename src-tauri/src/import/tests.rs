@@ -3,7 +3,8 @@ use crypto_secretbox::aead::{Aead, KeyInit};
 use crypto_secretbox::{Nonce, XSalsa20Poly1305};
 use sha2::{Digest, Sha512};
 
-const COOKIE: &str = "_|WARNING:-test-cookie-not-real";
+// A real cookie's shape (`normalize_cookie` wants 100+ header-safe characters).
+const COOKIE: &str = "_|WARNING:-test-cookie-not-real-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-padding";
 
 fn payload() -> Vec<u8> {
     serde_json::json!([
@@ -117,6 +118,34 @@ fn plain_mapping() {
     assert_eq!(b.window_rect, None, "partial window set ignored");
     assert_eq!(b.launch_target, None, "job id without a place is no target");
     assert_eq!(b.last_launched_at.as_deref(), Some("2024-05-06T19:08:09Z"));
+}
+
+#[test]
+fn names_cleaned_cookies_checked_caps_held() {
+    let raw = serde_json::json!([
+        { "Username": "\u{202e}evil\u{200b}", "SecurityToken": format!(".ROBLOSECURITY={COOKIE};"),
+          "Fields": { "MaxFPS": "500" } },
+        { "Username": "Ok", "SecurityToken": "short" },
+        { "Username": "\u{202e}\u{200b}" }
+    ]);
+    let (got, skipped) = decrypt(raw.to_string().as_bytes(), None).unwrap();
+    assert_eq!(
+        (got.len(), skipped),
+        (2, 1),
+        "an all-invisible name is skipped"
+    );
+    assert_eq!(got[0].username, "evil");
+    assert_eq!(got[0].cookie.as_deref().map(String::as_str), Some(COOKIE));
+    assert_eq!(got[0].fps_cap, Some(240));
+    assert!(got[1].cookie.is_none(), "malformed cookie dropped");
+    let many = format!(
+        "[{}]",
+        vec![r#"{"Username":"u"}"#; MAX_ENTRIES + 1].join(",")
+    );
+    assert_eq!(
+        decrypt(many.as_bytes(), None).unwrap_err(),
+        ImportError::TooMany
+    );
 }
 
 #[test]

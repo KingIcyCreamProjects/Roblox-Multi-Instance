@@ -4,7 +4,9 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { create } from "zustand";
+import { useUi } from "@/app/store";
 import { t } from "@/lib/i18n";
+import { Button } from "./ui/Button";
 
 type Toast = {
   id: number;
@@ -78,16 +80,17 @@ function Item({ x, dismiss }: { x: Toast; dismiss: (id: number) => void }) {
     >
       <p className="min-w-0 flex-1 break-words">{x.message}</p>
       {x.action && (
-        <button
-          type="button"
-          className="rounded-control px-2.5 py-1 text-13 font-medium text-accent-text hover:bg-surface-4"
+        <Button
+          variant="ghost"
+          sm
+          className="text-accent-text! hover:bg-surface-4!"
           onClick={() => {
             x.action!.run();
             dismiss(x.id);
           }}
         >
           {x.action.label}
-        </button>
+        </Button>
       )}
       <button
         type="button"
@@ -101,19 +104,27 @@ function Item({ x, dismiss }: { x: Toast; dismiss: (id: number) => void }) {
   );
 }
 
-/** Bottom-right, above the Play bar (`playbar`) or else above a page's 4rem footer (Settings save
- * bar). The region is a polite live region, so toasts are announced. */
+/** Bottom-right, above the Play bar (`playbar`), the Settings save bar (4rem) or the window edge.
+ * The region is a polite live region, so toasts are announced (each on its own, not the stack). */
 export function Toaster({ playbar = true }: { playbar?: boolean }) {
   const { items, dismiss } = useToasts();
+  const settings = useUi((u) => u.route === "settings");
   // Portaled to body so it is not trapped under dialog scrims by .app-win's stacking context.
+  // data-modal-pass: pressing a toast does not close an open sheet (see useModalFocus).
   return createPortal(
     <div
       role="status"
       aria-live="polite"
+      aria-atomic={false}
       aria-label={t("toast.region")}
+      data-modal-pass
       className={clsx(
         "pointer-events-none fixed right-7 z-[60] flex w-[21.25rem] max-w-[calc(100vw-3.5rem)] flex-col items-end gap-2",
-        playbar ? "bottom-[calc(var(--playbar-h)+12px)]" : "bottom-[calc(4rem+12px)]",
+        playbar
+          ? "bottom-[calc(var(--playbar-h)+12px)]"
+          : settings
+            ? "bottom-[calc(4rem+12px)]"
+            : "bottom-3",
       )}
     >
       <AnimatePresence initial={false}>

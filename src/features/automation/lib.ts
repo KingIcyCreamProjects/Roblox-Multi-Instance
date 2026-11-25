@@ -1,4 +1,5 @@
 import type { ConsoleLine } from "@/lib/ipc";
+import { LOCALE } from "@/lib/i18n";
 
 export const DOCS_URL =
   "https://github.com/KingIcyCreamProjects/Roblox-Multi-Instance/blob/main/docs/AUTOMATION.md";
@@ -11,7 +12,7 @@ export function filterLines(lines: ConsoleLine[], q: string): ConsoleLine[] {
   return n ? lines.filter((l) => l.text.toLowerCase().includes(n)) : lines;
 }
 
-export const fmtTime = (ms: number) => new Date(ms).toLocaleTimeString([], { hour12: false });
+export const fmtTime = (ms: number) => new Date(ms).toLocaleTimeString(LOCALE, { hour12: false });
 
 export const wsUrl = (port: number, tok: string) =>
   `ws://127.0.0.1:${port}/control?token=${tok}&account=<name>`;

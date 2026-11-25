@@ -5,8 +5,16 @@ import { SECTIONS } from "@/features/settings/catalog";
 import * as ipc from "@/lib/ipc";
 import { call } from "@/lib/ipc";
 import { resetVaultMock } from "@/lib/mock";
+import pkg from "../../../package.json";
+import tauriConf from "../../../src-tauri/tauri.conf.json";
 import { UPDATES } from "./log";
 import { UpdateLog, useUpdateLog, useWhatsNew } from "./UpdateLog";
+
+// useWhatsNew opens the log only when it has an entry for the running version
+test("the newest update-log entry is the app version", () => {
+  expect(UPDATES[0]!.version).toBe(tauriConf.version);
+  expect(pkg.version).toBe(tauriConf.version);
+});
 
 function Probe() {
   useWhatsNew();

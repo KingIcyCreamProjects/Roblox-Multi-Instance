@@ -7,7 +7,7 @@ import { useSettings, useSetSettings } from "@/app/useSettings";
 import { Sheet } from "@/components/ui/Sheet";
 import { tourSteps } from "@/features/onboarding/Tour";
 import { call } from "@/lib/ipc";
-import { t } from "@/lib/i18n";
+import { LOCALE, t } from "@/lib/i18n";
 import { UPDATES, type Update } from "./log";
 
 /** `pick`: version shown in detail; null = the list. */
@@ -19,7 +19,7 @@ export const openUpdateLog = (pick: string | null = null) =>
   useUpdateLog.setState({ open: true, pick });
 
 const day = (d: string) =>
-  new Date(`${d}T00:00:00`).toLocaleDateString(undefined, {
+  new Date(`${d}T00:00:00`).toLocaleDateString(LOCALE, {
     year: "numeric",
     month: "long",
     day: "numeric",
@@ -78,7 +78,7 @@ function Detail({ u }: { u: Update }) {
                       className="inline-flex items-center gap-0.5 rounded-chip font-medium whitespace-nowrap text-accent-text hover:underline"
                     >
                       {t("updates.show")}
-                      <ChevronRight size={12} strokeWidth={2} aria-hidden />
+                      <ChevronRight size={12} strokeWidth={1.75} aria-hidden />
                     </button>
                   </li>
                 ),
@@ -99,7 +99,7 @@ function List() {
           <button
             type="button"
             onClick={() => useUpdateLog.setState({ pick: u.version })}
-            className="flex w-full items-center gap-3 rounded-control bg-surface-2 px-4 py-3 text-left shadow-[inset_0_0_0_1px_var(--hairline)] hover:bg-surface-3"
+            className="flex w-full items-center gap-3 rounded-control bg-surface-2 px-4 py-3 text-left shadow-[inset_0_0_0_1px_var(--hairline)] hover:bg-surface-3 focus-visible:shadow-[var(--focus-ring)]"
           >
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-2 text-12 text-text-3">

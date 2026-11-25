@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { t } from "@/lib/i18n";
 import { resetAccountsMock } from "@/lib/mock";
@@ -33,6 +33,35 @@ test("Ctrl+K opens the palette, but not over another dialog", async () => {
   await u.keyboard("{Control>}k{/Control}");
   expect(useUi.getState().paletteOpen).toBe(true);
   expect(await screen.findByRole("listbox")).toBeInTheDocument();
+});
+
+test("Esc gives focus back to what had it before the palette opened", async () => {
+  const u = userEvent.setup();
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <button type="button">opener</button>
+      <Palette />
+    </QueryClientProvider>,
+  );
+  const opener = screen.getByRole("button", { name: "opener" });
+  opener.focus();
+  await u.keyboard("{Control>}k{/Control}");
+  await screen.findByRole("listbox");
+  await u.keyboard("{Escape}");
+  await waitFor(() => expect(opener).toHaveFocus());
+});
+
+test("a remote session hides the Go to commands (the route is held)", async () => {
+  useUi.setState({ remoteOpen: true, paletteOpen: true });
+  try {
+    wrap(false);
+    await screen.findByRole("listbox");
+    const go = t("palette.goTo", { place: t("nav.settings") });
+    expect(screen.queryByText(go)).toBeNull();
+    expect(screen.getByText(t("title.lock"))).toBeInTheDocument();
+  } finally {
+    useUi.setState({ remoteOpen: false });
+  }
 });
 
 test("unmounting (lock) closes the palette", () => {

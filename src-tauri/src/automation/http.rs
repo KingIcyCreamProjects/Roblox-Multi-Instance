@@ -34,6 +34,34 @@ fn body<T: DeserializeOwned>(b: Result<Json<T>, JsonRejection>) -> Result<T, Api
     })
 }
 
+/// axum's own rejections (a bad path or query, not a WS upgrade) are plain text: put them in
+/// the documented error shape. Both servers.
+pub(super) async fn json_errors(res: Response) -> Response {
+    let s = res.status();
+    let json = res
+        .headers()
+        .get(CONTENT_TYPE)
+        .is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+    if json || !(s.is_client_error() || s.is_server_error()) {
+        return res;
+    }
+    let text = axum::body::to_bytes(res.into_body(), 4096)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).trim().to_owned())
+        .unwrap_or_default();
+    let code = match s.as_u16() {
+        404 => "not_found",
+        500.. => "internal",
+        _ => "bad_request",
+    };
+    let msg = if text.is_empty() {
+        s.canonical_reason().unwrap_or("Error").to_owned()
+    } else {
+        text
+    };
+    ApiError::new(s.as_u16(), code, msg).into_response()
+}
+
 impl Ctx {
     /// `family` is the settings suffix: Read, Launch, Edit, Social, Secrets.
     fn gate(&self, family: &str) -> Result<(), ApiError> {
@@ -81,6 +109,7 @@ pub fn router(ctx: Ctx) -> Router {
                 // Global: Router::layer wraps each route, so share one semaphore.
                 .layer(tower::limit::GlobalConcurrencyLimitLayer::new(64)),
         )
+        .layer(middleware::map_response(json_errors))
         .layer(middleware::from_fn_with_state(ctx.clone(), auth))
         .layer(middleware::from_fn_with_state(ctx.clone(), super::guard))
         .with_state(ctx)
@@ -203,9 +232,12 @@ async fn cookie(State(c): State<Ctx>, Path(name): Path<String>, req: Request) ->
             "Secrets are only served to this PC (127.0.0.1)",
         ));
     }
-    // Every call is logged (never the value); the UI toasts once the account was found.
-    log::warn!("automation API: cookie requested for account {name:?}");
-    let cookie = c.backend.cookie(&name).await?;
+    // Every read is logged (never the value) and toasted, once the account was found: no
+    // username in the log while the vault is locked.
+    let cookie = c.backend.cookie(&name).await.inspect_err(|e| {
+        log::warn!("automation API: cookie request refused ({})", e.code);
+    })?;
+    log::warn!("automation API: cookie read for account {name:?}");
     c.hub.notify_secret(&name);
     ok(json!({ "cookie": cookie }))
 }
@@ -319,6 +351,9 @@ mod tests {
             (s, &b["error"]["code"]),
             (405, &json!("method_not_allowed"))
         );
+        // axum's own path rejection (invalid UTF-8) is rewrapped too.
+        let (s, b) = call(&a, "GET", "/v1/accounts/%FF", "", bearer(&a)).await;
+        assert_eq!((s, &b["error"]["code"]), (400, &json!("bad_request")));
         let big = format!(r#"{{"cookie":"{}"}}"#, "x".repeat(3 << 20));
         let (s, b) = call(&a, "POST", "/v1/accounts/import-cookie", &big, bearer(&a)).await;
         assert_eq!((s, &b["error"]["code"]), (413, &json!("too_large")));

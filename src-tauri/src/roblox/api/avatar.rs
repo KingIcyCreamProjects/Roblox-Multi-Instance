@@ -57,6 +57,10 @@ pub async fn wear(c: &RobloxClient, ck: &Secret, outfit_id: u64) -> Result<Vec<(
     let d: Value = c
         .get_json("avatar", &format!("/v1/outfits/{outfit_id}/details"), None)
         .await?;
+    // No `assets` array is an unknown reply, not "wear nothing": that would strip the avatar.
+    if !d["assets"].is_array() {
+        return Err(RobloxError::Decode("outfit details without assets".into()));
+    }
     let applied = std::sync::atomic::AtomicBool::new(false);
     let applied = &applied;
     let post = |path: &'static str, body: Value| async move {
@@ -171,6 +175,28 @@ mod tests {
         // first step fails, nothing applied yet: the raw error
         let e = wear(&c, &ck, 78).await.unwrap_err();
         assert!(matches!(e, RobloxError::Status { code: 500, .. }), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn wear_without_assets_writes_nothing() {
+        let posts = Arc::new(AtomicU32::new(0));
+        let p = posts.clone();
+        let app = Router::new()
+            .route(
+                "/v1/outfits/79/details",
+                get(|| async { Json(json!({"playerAvatarType": "R15"})) }),
+            )
+            .fallback(move || {
+                let p = p.clone();
+                async move {
+                    p.fetch_add(1, SeqCst);
+                    Json(json!({}))
+                }
+            });
+        let c = crate::roblox::mock(app).await;
+        let e = wear(&c, &Secret::new("c"), 79).await.unwrap_err();
+        assert!(matches!(e, RobloxError::Decode(_)), "{e:?}");
+        assert_eq!(posts.load(SeqCst), 0);
     }
 
     #[tokio::test]

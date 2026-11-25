@@ -64,7 +64,8 @@ export function ReauthSheet() {
       await call("reauth", { password: os ? null : pw });
       finish(true);
     } catch (e) {
-      setErr(vaultError(e));
+      // closed (or closed and reopened) meanwhile: the old error belongs to no open request
+      if (useReauth.getState().resolve === resolve) setErr(vaultError(e));
     } finally {
       setBusy(false);
     }

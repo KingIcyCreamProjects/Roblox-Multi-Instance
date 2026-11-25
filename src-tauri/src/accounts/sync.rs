@@ -361,7 +361,11 @@ pub(crate) fn apply_checks(
             .and_then(|a| a.user_id);
         let other = match (&c.user, saved_uid) {
             (Some(u), Some(x)) if u.id != x => {
-                log::warn!("session check: the cookie of account {x} belongs to another user");
+                // RMI's own id: a Roblox user id resolves publicly to the username
+                log::warn!(
+                    "session check: the cookie of account {} belongs to another user",
+                    c.id
+                );
                 true
             }
             _ => false,

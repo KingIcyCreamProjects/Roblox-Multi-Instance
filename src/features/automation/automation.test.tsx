@@ -1,3 +1,4 @@
+import * as Tooltip from "@radix-ui/react-tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -186,7 +187,11 @@ test("number control fires once for Enter+blur, never for empty, honours decimal
 test("Save to file calls automation_save_console for the selected account", async () => {
   const u = userEvent.setup();
   const spy = vi.spyOn(ipc, "call");
-  wrap(<AutomationPage />);
+  wrap(
+    <Tooltip.Provider>
+      <AutomationPage />
+    </Tooltip.Provider>,
+  );
   await u.click(await screen.findByRole("button", { name: /Save to file/ }));
   expect(spy).toHaveBeenCalledWith("automation_save_console", { account: "Alice" });
   spy.mockRestore();
@@ -264,7 +269,9 @@ test("two quick relaunch clicks toggle on then off (optimistic, before any refet
   const u = userEvent.setup();
   render(
     <QueryClientProvider client={qc}>
-      <AutomationPage />
+      <Tooltip.Provider>
+        <AutomationPage />
+      </Tooltip.Provider>
     </QueryClientProvider>,
   );
   const box = screen.getByRole("switch", { name: "Auto-relaunch" });
@@ -402,7 +409,9 @@ test("Clear hides the lines on screen and says so when none are left", async () 
   );
   render(
     <QueryClientProvider client={qc}>
-      <AutomationPage />
+      <Tooltip.Provider>
+        <AutomationPage />
+      </Tooltip.Provider>
     </QueryClientProvider>,
   );
   expect(await screen.findByText("first line")).toBeInTheDocument();
@@ -454,7 +463,9 @@ test("a failed status read shows an error, and Retry refetches it", async () => 
   qc.setQueryData(["snap"], []);
   render(
     <QueryClientProvider client={qc}>
-      <AutomationPage />
+      <Tooltip.Provider>
+        <AutomationPage />
+      </Tooltip.Provider>
     </QueryClientProvider>,
   );
   expect(await screen.findByRole("alert")).toHaveTextContent(t("auto.statusError"));
@@ -519,7 +530,9 @@ test("Stop calls automation_stop, and a LAN notice shows while LAN access is on"
   const u = userEvent.setup();
   render(
     <QueryClientProvider client={qc}>
-      <AutomationPage />
+      <Tooltip.Provider>
+        <AutomationPage />
+      </Tooltip.Provider>
     </QueryClientProvider>,
   );
   expect(await screen.findByText(t("auto.lan"))).toBeInTheDocument();
@@ -538,7 +551,9 @@ test("send skips blank text, then sends the typed text and clears the box", asyn
   const u = userEvent.setup();
   render(
     <QueryClientProvider client={qc}>
-      <AutomationPage />
+      <Tooltip.Provider>
+        <AutomationPage />
+      </Tooltip.Provider>
     </QueryClientProvider>,
   );
   const box = screen.getByLabelText(t("auto.sendHint"));

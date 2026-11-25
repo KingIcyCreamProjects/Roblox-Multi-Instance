@@ -52,7 +52,7 @@ export function Discover() {
           )}
         </p>
       </div>
-      {/* Servers, Games and Universe stay mounted so a running stream, rows and typed drafts survive tab switches. */}
+      {/* Servers, Games, Outfits and Universe stay mounted so a running stream, rows and typed drafts survive tab switches. */}
       <Tabs.Content value="servers" forceMount className={content}>
         <Servers />
       </Tabs.Content>
@@ -62,7 +62,7 @@ export function Discover() {
       <Tabs.Content value="favorites" className={content}>
         <Favorites />
       </Tabs.Content>
-      <Tabs.Content value="outfits" className={content}>
+      <Tabs.Content value="outfits" forceMount className={content}>
         <Outfits />
       </Tabs.Content>
       <Tabs.Content value="universe" forceMount className={content}>

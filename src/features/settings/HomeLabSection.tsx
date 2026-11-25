@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { openExternal } from "@/lib/events";
+import { reportError } from "@/lib/report";
 import { call, errMessage, hasCode } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
 import { Row } from "./controls";
@@ -45,7 +46,7 @@ export function HomeLabSection() {
   // only this repo's pages: the release JSON is not trusted to pick where the browser goes
   const page = rel?.page.startsWith(REPO) ? rel.page : RELEASES;
   const github = (
-    <Button sm onClick={() => void openExternal(page)}>
+    <Button sm onClick={() => void openExternal(page).catch(reportError)}>
       {t("hl.github")}
     </Button>
   );

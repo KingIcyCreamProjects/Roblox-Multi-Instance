@@ -15,6 +15,8 @@ pub const MAGIC: &[u8; 64] = b"Roblox Account Manager created by ic3w0lf22 @ git
 const ENTROPY: &[u8] = b"ROBLOX ACCOUNT MANAGER | :) | BROUGHT TO YOU BUY ic3w0lf";
 /// Cap on any source file / text we parse.
 pub const MAX_FILE: u64 = 32 * 1024 * 1024;
+/// Cap on accounts in one file.
+const MAX_ENTRIES: usize = 5000;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const MAC_LEN: usize = 16;
@@ -42,6 +44,9 @@ pub enum ImportError {
     DpapiUnsupported,
     #[error("This file is too large to be an account list.")]
     TooLarge,
+    /// Coded: the catalog text (src/lib/ipc.ts) states the `MAX_ENTRIES` limit.
+    #[error("IMPORT_TOO_MANY")]
+    TooMany,
     #[error("Could not read the file.")]
     Unreadable,
     #[error("Not a recognised account file.")]
@@ -138,6 +143,21 @@ pub fn read_capped(path: &Path) -> Result<Vec<u8>, ImportError> {
     Ok(buf)
 }
 
+/// Enough of a file to sniff it (the size check uses its length, not a full read). Wiped on
+/// drop: a plain file starts with cookies.
+fn head(path: &Path) -> Result<Zeroizing<Vec<u8>>, ImportError> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).map_err(|_| ImportError::Unreadable)?;
+    if f.metadata().map_err(|_| ImportError::Unreadable)?.len() > MAX_FILE {
+        return Err(ImportError::TooLarge);
+    }
+    let mut buf = Zeroizing::new(Vec::with_capacity(4096));
+    f.take(4096)
+        .read_to_end(&mut buf)
+        .map_err(|_| ImportError::Unreadable)?;
+    Ok(buf)
+}
+
 /// Look for the known files in `dir` (case-sensitive names, read-only).
 /// `account_data` is reported whenever the file exists; its encoding may be an error
 /// (too large, unreadable, unrecognised).
@@ -145,7 +165,7 @@ pub fn detect(dir: &Path) -> Detected {
     let find = |n: &str| Some(dir.join(n)).filter(|p| p.is_file());
     Detected {
         account_data: find("AccountData.json").map(|p| {
-            let enc = read_capped(&p).and_then(|b| sniff(&b));
+            let enc = head(&p).and_then(|b| sniff(&b));
             (p, enc)
         }),
         settings: find("RAMSettings.ini"),
@@ -167,8 +187,14 @@ pub fn decrypt(
         Encoding::Dpapi => dpapi_unprotect(bytes)?,
         Encoding::Plain => Zeroizing::new(strip_bom(bytes).to_vec()),
     };
+    // BOM inside a decrypted file too, not only a plain one.
     let mut items: Vec<Value> =
-        serde_json::from_slice(&payload).map_err(|_| ImportError::Unrecognised)?;
+        serde_json::from_slice(strip_bom(&payload)).map_err(|_| ImportError::Unrecognised)?;
+    // A real account file holds far fewer; a huge one would make the commit quadratic.
+    if items.len() > MAX_ENTRIES {
+        items.iter_mut().for_each(crate::accounts::wipe_value);
+        return Err(ImportError::TooMany);
+    }
     let out: Vec<ImportedAccount> = items.iter().filter_map(map_account).collect();
     let skipped = items.len() - out.len();
     // the parsed copies hold every cookie/password: wipe before drop
@@ -258,17 +284,31 @@ fn secret(v: &Value, k: &str) -> Option<Zeroizing<String>> {
     s(v, k).map(Zeroizing::new)
 }
 
+/// Names from the old file: no control or invisible format characters (bidi overrides,
+/// zero-width marks), trimmed, at most `max` characters.
+fn clean(s: &str, max: usize) -> String {
+    let s: String = s
+        .chars()
+        .filter(|c| !c.is_control() && !crate::remote::invisible(*c))
+        .collect();
+    s.trim().chars().take(max).collect()
+}
+
 fn map_account(v: &Value) -> Option<ImportedAccount> {
-    let username = s(v, "Username")?;
+    let username = Some(clean(&s(v, "Username")?, 40)).filter(|u| !u.is_empty())?;
     let mut a = ImportedAccount {
         user_id: s(v, "UserID").and_then(|x| x.parse().ok()),
         username,
-        alias: s(v, "Alias").map(|x| x.chars().take(50).collect()),
+        alias: s(v, "Alias").map(|x| clean(&x, 50)),
         note: s(v, "Description").map(|x| x.chars().take(5000).collect()),
         group: s(v, "Group")
-            .filter(|g| g != "Default")
+            .map(|g| clean(&g, 64))
+            .filter(|g| !g.is_empty() && g != "Default")
             .unwrap_or_else(|| "Unsorted".into()),
-        cookie: secret(v, "SecurityToken"),
+        // Same shape check as a pasted cookie; a malformed one is dropped.
+        cookie: secret(v, "SecurityToken")
+            .and_then(|c| crate::accounts::normalize_cookie(&c))
+            .map(Zeroizing::new),
         password: secret(v, "Password"),
         last_launched_at: s(v, "LastUse").and_then(|d| parse_date(&d)),
         tracker_id: s(v, "BrowserTrackerID"),
@@ -299,9 +339,10 @@ fn map_account(v: &Value) -> Option<ImportedAccount> {
     a.fps_cap = f
         .remove("MaxFPS")
         .and_then(|x| x.trim().parse().ok())
-        .filter(|n| (1..=1000).contains(n));
-    // Window keys: X, Y, Width|W, Height|H. Only a complete, parsable set becomes a rect;
-    // otherwise every Window_* key stays in `extra`.
+        .filter(|n: &u32| (1..=1000).contains(n))
+        .map(|n| n.min(240)); // the app's range (the Inspector refuses more)
+                              // Window keys: X, Y, Width|W, Height|H. Only a complete, parsable set becomes a rect;
+                              // otherwise every Window_* key stays in `extra`.
     let num = |f: &BTreeMap<String, String>, names: &[&str]| {
         names
             .iter()

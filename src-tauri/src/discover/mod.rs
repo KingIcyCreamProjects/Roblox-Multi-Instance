@@ -127,10 +127,16 @@ pub fn format_region(format: &str, v: &Value) -> Option<Region> {
         Some(n @ (Value::Number(_) | Value::Bool(_))) => n.to_string(),
         _ => String::new(),
     });
+    // Outside text (plain HTTP by default): no control or invisible chars, capped.
+    let filled: String = filled
+        .chars()
+        .filter(|c| !c.is_control() && !crate::remote::invisible(*c))
+        .collect();
     let label = SEPS.replace_all(&filled, "$1 ");
     let label = label.trim_matches(|c: char| c.is_whitespace() || ",|/·-".contains(c));
+    let label: String = label.chars().take(64).collect();
     (!label.is_empty()).then(|| Region {
-        label: label.to_string(),
+        label,
         country_code: v
             .get("countryCode")
             .and_then(Value::as_str)
@@ -140,7 +146,7 @@ pub fn format_region(format: &str, v: &Value) -> Option<Region> {
 }
 
 pub fn like_ratio(up: u64, down: u64) -> Option<f64> {
-    let total = up + down;
+    let total = up.saturating_add(down);
     (total > 0).then(|| up as f64 / total as f64)
 }
 
@@ -1185,6 +1191,15 @@ mod tests {
     fn like_ratio_handles_zero() {
         assert_eq!(like_ratio(0, 0), None);
         assert_eq!(like_ratio(3, 1), Some(0.75));
+        assert!(like_ratio(u64::MAX, 1).is_some_and(|r| r <= 1.0));
+    }
+
+    #[test]
+    fn region_label_cleaned_and_capped() {
+        let city = format!("\u{202e}Ber\u{200b}lin{}", "x".repeat(100));
+        let r = format_region("{city}", &serde_json::json!({ "city": city })).unwrap();
+        assert!(r.label.starts_with("Berlin"));
+        assert_eq!(r.label.chars().count(), 64);
     }
 
     #[test]

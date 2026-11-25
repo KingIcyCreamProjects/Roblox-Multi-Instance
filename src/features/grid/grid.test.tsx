@@ -87,6 +87,8 @@ test("Arrange sends order + layout and saves them as the default", async () => {
   const cards = screen.getAllByRole("radio");
   expect(cards[0]).toHaveAttribute("aria-checked", "true");
   expect(screen.getByText("Best")).toBeInTheDocument();
+  // roving focus (Radix ToggleGroup): one Tab stop for the group
+  expect(cards.slice(1).every((c) => c.tabIndex === -1)).toBe(true);
   await userEvent.click(cards[cards.length - 1]);
   await userEvent.click(arrange);
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));

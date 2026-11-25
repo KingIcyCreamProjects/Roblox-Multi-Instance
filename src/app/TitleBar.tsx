@@ -40,6 +40,7 @@ export function TitleBar({
   const set = useSetSettings();
   const hidden = s ? !s.ui.showUsernames : false;
   const lock = useLock();
+  const remoteOpen = useUi((u) => u.remoteOpen);
   // Until platform info loads, guess from the UA so macOS never flashes Windows controls.
   const mac = (os ?? (navigator.userAgent.includes("Mac") ? "macos" : undefined)) === "macos";
   // frameless: our own Maximize button, so it must turn into Restore when maximized
@@ -66,8 +67,10 @@ export function TitleBar({
   return (
     <header
       data-tauri-drag-region
-      className="@container/bar grid h-[var(--titlebar-h)] shrink-0 grid-cols-[auto_1fr_auto] items-center gap-3 pr-3 pl-5"
-      style={mac ? { paddingLeft: 80 } : undefined}
+      data-modal-pass
+      className="titlebar @container/bar grid h-[var(--titlebar-h)] shrink-0 grid-cols-[auto_1fr_auto] items-center gap-3 pr-3 pl-5"
+      // macOS: clears the traffic lights (trafficLightPosition x 20, three 14 px buttons 20 px apart) + 12 px
+      style={mac ? { paddingLeft: 86 } : undefined}
     >
       <div data-tauri-drag-region className="flex min-w-0 items-center gap-2 text-text-2">
         <Mark size={16} className="shrink-0 text-text-2" />
@@ -85,9 +88,11 @@ export function TitleBar({
       <div data-tauri-drag-region className="flex items-center justify-end gap-0.5">
         {!minimal && (
           <>
+            {/* a remote session holds the screen: no palette or update log over it */}
             <IconButton
               label={t("title.search")}
               aria-haspopup="dialog"
+              disabled={remoteOpen}
               onClick={() => useUi.setState({ paletteOpen: true })}
             >
               <Search size={16} strokeWidth={1.75} />
@@ -95,6 +100,7 @@ export function TitleBar({
             <IconButton
               label={t("updates.open")}
               aria-haspopup="dialog"
+              disabled={remoteOpen}
               onClick={() => openUpdateLog()}
             >
               <Megaphone size={16} strokeWidth={1.75} />
@@ -115,7 +121,7 @@ export function TitleBar({
           </>
         )}
         {!mac && (
-          <div className="ml-2 flex items-center gap-1">
+          <div className="win-ctl ml-2 flex items-center gap-1">
             <IconButton label={t("title.minimize")} onClick={winAction((w) => w.minimize())}>
               <Minus size={16} strokeWidth={1.75} />
             </IconButton>
@@ -131,7 +137,7 @@ export function TitleBar({
             </IconButton>
             <IconButton
               label={t("title.close")}
-              className="hover:bg-error! hover:text-white!"
+              className="hover:bg-error! hover:text-on-image!"
               onClick={winAction((w) => w.close())}
             >
               <X size={16} strokeWidth={1.75} />

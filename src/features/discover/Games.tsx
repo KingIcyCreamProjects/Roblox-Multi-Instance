@@ -1,4 +1,5 @@
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
+import * as Tooltip from "@radix-ui/react-tooltip";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { Copy, LayoutGrid, List, MapPin, Play, Search, Server, Star, X } from "lucide-react";
@@ -10,6 +11,7 @@ import { usePlay } from "@/features/playbar/usePlay";
 import { call, type GameTile } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
 import { reportError } from "@/lib/report";
+import { removedToast } from "./Favorites";
 import {
   copyText,
   ErrorLine,
@@ -104,7 +106,7 @@ export function Games() {
               onClick={() => setQ("")}
               className="absolute top-1/2 right-1 inline-grid size-6 -translate-y-1/2 place-items-center rounded-chip text-text-3 hover:bg-surface-4 hover:text-text-1"
             >
-              <X size={12} strokeWidth={2} />
+              <X size={12} strokeWidth={1.75} />
             </button>
           )}
         </div>
@@ -121,15 +123,26 @@ export function Games() {
               ["grid", LayoutGrid, "games.viewGrid"],
             ] as const
           ).map(([v, Icon, label]) => (
-            <ToggleGroup.Item
-              key={v}
-              value={v}
-              aria-label={t(label)}
-              title={t(label)}
-              className="inline-grid h-7 w-9 place-items-center rounded-full text-text-3 transition-colors hover:text-text-1 data-[state=on]:bg-surface-4 data-[state=on]:text-text-1"
-            >
-              <Icon size={14} strokeWidth={1.75} />
-            </ToggleGroup.Item>
+            // the same styled tooltip as IconButton, not a bare title
+            <Tooltip.Root key={v}>
+              <Tooltip.Trigger asChild>
+                <ToggleGroup.Item
+                  value={v}
+                  aria-label={t(label)}
+                  className="inline-grid h-7 w-9 place-items-center rounded-full text-text-3 transition-colors hover:text-text-1 data-[state=on]:bg-surface-4 data-[state=on]:text-text-1"
+                >
+                  <Icon size={14} strokeWidth={1.75} />
+                </ToggleGroup.Item>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content
+                  sideOffset={6}
+                  className="glass z-50 rounded-chip px-2 py-1 text-12 text-text-1"
+                >
+                  {t(label)}
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
           ))}
         </ToggleGroup.Root>
       </div>
@@ -249,8 +262,11 @@ function Details({ g }: { g: GameTile }) {
   const toggleFav = async () => {
     setFavBusy(true);
     try {
-      if (fav) await call("favorites_remove", { id: fav.id });
-      else await call("favorites_add", { placeId: g.placeId, name: g.name, privateLink: null });
+      if (fav) {
+        const at = favs!.findIndex((f) => f.id === fav.id);
+        await call("favorites_remove", { id: fav.id });
+        removedToast(qc, fav, at); // the same Undo as the Favorites tab
+      } else await call("favorites_add", { placeId: g.placeId, name: g.name, privateLink: null });
     } catch (e) {
       reportError(e);
     }
@@ -260,7 +276,20 @@ function Details({ g }: { g: GameTile }) {
   return (
     <>
       <Thumb src={g.thumbnail} className="aspect-video shrink-0 rounded-panel" />
-      <PanelTitle title={g.name} sub={g.creator} />
+      {/* the star sits by the title: next to the two buttons it wrapped alone at 960 px */}
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <PanelTitle title={g.name} sub={g.creator} />
+        </div>
+        <IconButton
+          label={fav ? t("games.unfavorite") : t("games.favorite")}
+          aria-busy={favBusy || undefined}
+          disabled={favBusy || (!favs && !favsErr)}
+          onClick={() => void (favs ? toggleFav() : refetchFavs())}
+        >
+          <Star size={16} strokeWidth={1.75} fill={fav ? "currentColor" : "none"} />
+        </IconButton>
+      </div>
       <Stats g={g} className="-mt-2 text-12 text-text-3" />
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="primary" onClick={() => sendToBar(String(g.placeId), g.name)}>
@@ -272,17 +301,9 @@ function Details({ g }: { g: GameTile }) {
           aria-describedby={sel.length ? undefined : "games-play-why"}
           onClick={() => play(sel, { here: true, dest: String(g.placeId) })}
         >
-          <Play size={14} strokeWidth={2} />
+          <Play size={14} strokeWidth={1.75} />
           {t("games.playNow")}
         </Button>
-        <IconButton
-          label={fav ? t("games.unfavorite") : t("games.favorite")}
-          aria-busy={favBusy || undefined}
-          disabled={favBusy || (!favs && !favsErr)}
-          onClick={() => void (favs ? toggleFav() : refetchFavs())}
-        >
-          <Star size={16} strokeWidth={1.75} fill={fav ? "currentColor" : "none"} />
-        </IconButton>
       </div>
       {/* visible, not a hover title: a disabled button can't be focused or hovered for it */}
       {!sel.length && (

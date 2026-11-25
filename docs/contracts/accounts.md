@@ -17,11 +17,16 @@ type Presence = {
   updatedAt: string; // ISO
 };
 
-type LaunchTarget = { placeId: number | null; jobId: string | null; privateLink: string | null };
+type LaunchTarget = {
+  placeId: number | null;
+  jobId: string | null;
+  privateLink: string | null;
+  mode?: "random" | "smallest" | null; // server pick for a place with no jobId; absent = any
+};
 
 type AccountView = {
   id: string;               // RMI uuid
-  userId: number | null;    // null only while session === "pending"
+  userId: number | null;    // null when not known yet (legacy or imported rows, any session state)
   username: string;
   displayName: string;
   alias: string | null;     // ≤ 50 chars
@@ -36,9 +41,14 @@ type AccountView = {
   session: SessionState;
   presence: Presence | null;
   launchTarget: LaunchTarget | null;
-  fpsCap: number | null;    // 1..1000
+  fpsCap: number | null;    // a patch must be 1..240 (older accounts may still hold up to 1000)
+  graphics: number | null;  // Roblox graphics level 1..10; null = the global setting
   windowRect: { x: number; y: number; w: number; h: number } | null;
   trackerId: string;
+  friendAllowed: boolean;   // the friend remote may control it
+  friendPaused: boolean;    // the friend disconnected it; set by Rust only
+  friendLastPlace: number | null;
+  friendAdded: boolean;     // the friend signed it in from the friend page
   extra: Record<string, string>;
   hasPassword: boolean;
   hasCookie: boolean;
@@ -69,9 +79,9 @@ type AddResult = {
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `accounts_list` | – | `AccountsList` | |
-| `accounts_add_cookies` | `{ text }` | `AddResult[]` | one cookie per line; normalises quotes, `.ROBLOSECURITY=` prefix, trailing `;`; blank lines skipped (not reported) |
-| `accounts_add_pending` | `{ text }` | `AddResult[]` | `username:password` per line |
-| `accounts_update` | `{ ids, patch }` | `void` | all ids in one save (all or nothing), one `accounts://changed`; a group change moves each to the end of the new group in `ids` order; patch keys: alias, note, group, color, pinned, launchTarget, fpsCap, extra (null clears) |
+| `accounts_add_cookies` | `{ text }` | `AddResult[]` | one cookie per line; normalises quotes, `.ROBLOSECURITY=` prefix, trailing `;`; blank lines skipped (not reported); refused over 200 non-blank lines or 1 MiB ("Add at most 200 accounts at a time.") |
+| `accounts_add_pending` | `{ text }` | `AddResult[]` | `username:password` per line; same 200-line / 1 MiB cap |
+| `accounts_update` | `{ ids, patch }` | `void` | all ids in one save (all or nothing), one `accounts://changed`; a group change moves each to the end of the new group in `ids` order; patch keys: alias, note, group, color, pinned, launchTarget, fpsCap (1..240), graphics (1..10), friendAllowed, extra (null clears) |
 | `accounts_remove` | `{ ids }` | `{ undoToken }` | undo valid 120 s in Rust (the toast offers it 8 s, paused on hover); restore skips an id or userId re-added meanwhile |
 | `accounts_undo_remove` | `{ undoToken }` | `void` | |
 | `accounts_reorder` | `{ group, ids }` | `void` | ids = full new order of that group |
@@ -80,8 +90,11 @@ type AddResult = {
 | `group_target_set` | `{ group, target: LaunchTarget \| null }` | `void` | null clears; saving on a group with no accounts errors; targets of emptied groups stay hidden and are pruned on the next set |
 | `account_copy` | `{ id, field }` | `void` | field: username, userId, profileLink, password, cookie. Rust writes clipboard; cookie/password need re-auth (error `REAUTH_REQUIRED`); clipboard cleared after 30 s if unchanged |
 | `account_reveal` | `{ id, field }` | `string` | field: cookie, password; needs re-auth |
+| `automation_token_copy` | – | `void` | Rust writes the automation token to the clipboard (cleared after 30 s, kept out of clipboard history) |
+| `friend_password_copy` | – | `void` | the friend password, the same way |
+| `friend_owner_password_copy` | – | `void` | the friend page's owner login password, the same way |
 | `reauth` | `{ password }` | `void` | password mode: master password; OS mode: password null → OS prompt. Valid 2 min |
-| `signin_start` | `{ accountId, usernameHint, password }` | `void` | opens login window; result via event. `password` (optional, typed in RMI before the window opens) is saved with the account on success |
+| `signin_start` | `{ accountId, usernameHint, password }` | `void` | opens login window; result via event. `SIGNIN_BUSY` (and the open window is focused) while another sign-in window is open. `password` (optional, typed in RMI before the window opens) is saved with the account on success |
 | `signin_kill_stray` | – | `number` | |
 | `accounts_validate` | `{ ids }` | `boolean` | ids null = all; false = a check is already running (single flight) |
 | `avatar_full` | `{ userId }` | `string \| null` | cached 420x420 full-body PNG path |
@@ -94,7 +107,7 @@ type AddResult = {
 
 ## Error strings
 
-Commands reject with a short user-readable string, or with an error code that is the whole string (`REAUTH_REQUIRED`, `VAULT_LOCKED`, `VAULT_WAS_LOCKED`, `WRONG_PASSWORD`, `VAULT_DAMAGED`, `PREVIEW_EXPIRED`). The UI branches only on codes (`hasCode`, exact match) and shows catalog text for them (`src/lib/ipc.ts` `CODE_TEXT`).
+Commands reject with a short user-readable string, or with an error code that is the whole string (`REAUTH_REQUIRED`, `VAULT_LOCKED`, `VAULT_WAS_LOCKED`, `WRONG_PASSWORD`, `VAULT_DAMAGED`, `PREVIEW_EXPIRED`, `SIGNIN_BUSY`). The UI branches only on codes (`hasCode`, exact match) and shows catalog text for them (`src/lib/ipc.ts` `CODE_TEXT`).
 
 ## Import (M7, spec §11)
 
@@ -102,9 +115,11 @@ Old files are only read. Decrypted accounts stay in Rust for 5 min under `previe
 
 Password buffer: Rust wraps the deserialized password in `Zeroizing` on arrival and drops it after decrypt. Copies outside Rust's control (the webview JS string, the IPC JSON request body) cannot be wiped; the UI clears its field after a successful read (kept for a retry after a wrong password) and on sheet close.
 
+Limits: the folder must be an absolute directory (verbatim `\\?\` and device paths are refused); an account file over 5000 entries is refused; a malformed cookie is dropped (the row comes in without it); an imported FPS cap is clamped to 240.
+
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `import_pick_folder` | – | `{ path } \| null` | native folder dialog |
 | `import_detect` | `{ path }` | `{ accountData: { encoding: "locked"\|"dpapi"\|"plain"\|null, error } \| null, settings, recents, favorites }` | booleans = file present |
 | `import_preview` | `{ path, password, accounts }` | `{ previewId, rows: [{ key, userId, username, alias, group, willUpdate, hasCookie, hasPassword, headshot }], prefs, games: { recents, favorites }, notes }` | vault must be unlocked; `accounts: false` = account file never decrypted; `notes` = unreadable settings/game files |
-| `import_commit` | `{ previewId, keys, importPrefs, importRecents, importFavorites }` | `{ results: [{ key, id, username, status: "added"\|"updated"\|"skipped"\|"failed", message }], notes: string[] }` | one vault save (backup required); existing userId keeps RMI metadata, only empty fields filled; a signed-in (session ok) account keeps its cookie ("Kept the current sign-in."), else the old cookie replaces it; the old password only fills an empty one; games: names default to the placeId (max 100 chars), thumbnails kept only for https `*.rbxcdn.com`, emits `recents://changed` and `favorites://changed`; trackerId adopted when new or never launched in RMI; previews from before a vault lock are refused; then `accounts://changed` and a session check |
+| `import_commit` | `{ previewId, keys, importPrefs, importRecents, importFavorites }` | `{ results: [{ key, id, username, status: "added"\|"updated"\|"skipped"\|"failed", message }], notes: string[], retry: boolean }` | `retry` = settings or games failed and the preview is kept so the commit can run again; one vault save (backup required); existing userId keeps RMI metadata, only empty fields filled; a signed-in (session ok) account keeps its cookie ("Kept the current sign-in."), else the old cookie replaces it; the old password only fills an empty one; games: names default to the placeId (max 100 chars), thumbnails kept only for https `*.rbxcdn.com`, emits `recents://changed` and `favorites://changed`; trackerId adopted when new or never launched in RMI; previews from before a vault lock are refused; then `accounts://changed` and a session check |

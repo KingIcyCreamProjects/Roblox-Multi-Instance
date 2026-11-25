@@ -2,12 +2,14 @@ import * as Tooltip from "@radix-ui/react-tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useUi } from "@/app/store";
+import * as ipc from "@/lib/ipc";
 import { mockCall, mockVault, resetVaultMock } from "@/lib/mock";
 import { t } from "@/lib/i18n";
 import { Recovery } from "./Recovery";
 
 const PW = "correct horse";
-const PICK = `${t("vault.damaged.pick")} vault-20260101-120000.rmiv`;
+const PICK = t("vault.damaged.pickOf", { name: "vault-20260101-120000.rmiv" });
 
 function setup(onRestored = () => {}) {
   render(
@@ -67,4 +69,26 @@ test("a restore refused for another reason shows the message as an alert, not on
   await user.click(await screen.findByRole("button", { name: PICK }));
   expect(await screen.findByRole("alert")).toHaveTextContent("The vault opens fine");
   expect(screen.getByLabelText(t("vault.damaged.pw"))).toHaveAttribute("aria-invalid", "false");
+});
+
+// the locked screen mounts no error banner: reportError would only show it after unlock
+test("an Open folder failure is shown here, not queued for the banner", async () => {
+  const orig = ipc.call;
+  const spy = vi
+    .spyOn(ipc, "call")
+    .mockImplementation((cmd, args) =>
+      cmd === "open_folder" ? Promise.reject(new Error("No folder.")) : orig(cmd, args as never),
+    );
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const user = userEvent.setup();
+    await damagedVault();
+    setup();
+    await user.click(screen.getByRole("button", { name: t("vault.damaged.openFolder") }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No folder.");
+    expect(useUi.getState().lastError).toBeNull();
+  } finally {
+    spy.mockRestore();
+    vi.mocked(console.error).mockRestore();
+  }
 });

@@ -3,7 +3,7 @@
   "short_name": "RMI Remote",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0b0c0f",
-  "theme_color": "#0b0c0f",
+  "background_color": "#07090f",
+  "theme_color": "#07090f",
   "icons": [{ "src": "/icon.png", "sizes": "256x256", "type": "image/png", "purpose": "any" }]
 }

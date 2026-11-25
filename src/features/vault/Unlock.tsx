@@ -109,7 +109,10 @@ export function Unlock({
                 label={t("vault.password")}
                 autoComplete="current-password"
                 value={pw}
-                onChange={(e) => setPw(e.target.value)}
+                onChange={(e) => {
+                  setPw(e.target.value);
+                  if (!damaged) setError(null); // a new try: the old "Wrong password." no longer applies
+                }}
                 error={error}
                 disabled={pending}
               />

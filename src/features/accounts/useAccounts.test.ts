@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { useUi } from "@/app/store";
 import { useToasts } from "@/components/Toasts";
 import { usePlayBar } from "@/features/playbar/store";
 import { t } from "@/lib/i18n";
@@ -138,6 +139,34 @@ test("setGroupTarget: a refused target reverts to the saved ones; null clears", 
   expect(qc.getQueryData<AccountsList>(KEY)!.groupTargets).toEqual({ Main: target });
   expect(await result.current.act.setGroupTarget("Main", null)).toBe(true);
   expect(qc.getQueryData<AccountsList>(KEY)!.groupTargets).toEqual({});
+});
+
+test("a refused rename or reorder puts the list, collapse and group selection back", async () => {
+  resetAccountsMock(6); // two accounts per group
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result } = renderHook(() => ({ list: useAccounts(), act: useAccountActions() }), {
+    wrapper: wrap(qc),
+  });
+  await waitFor(() => expect(result.current.list.data).toBeDefined());
+  const before = qc.getQueryData<AccountsList>(KEY)!;
+  useUi.setState({ collapsed: new Set(["Main"]), selGroup: "Main" });
+  const orig = ipc.call;
+  vi.spyOn(ipc, "call").mockImplementation((cmd, args) =>
+    cmd === "group_rename" || cmd === "accounts_reorder"
+      ? Promise.reject(new Error(`${cmd}: Save failed`))
+      : orig(cmd, args as never),
+  );
+  await act(() => result.current.act.renameGroup("Main", "Alts"));
+  expect(useUi.getState().collapsed).toEqual(new Set(["Main"]));
+  expect(useUi.getState().selGroup).toBe("Main");
+  await waitFor(() => expect(qc.getQueryData<AccountsList>(KEY)!.groups).toEqual(before.groups));
+  const order = before.accounts.map((a) => [a.id, a.order]);
+  const main = before.accounts.filter((a) => a.group === "Main").map((a) => a.id);
+  await act(() => result.current.act.reorder("Main", main.reverse()));
+  await waitFor(() =>
+    expect(qc.getQueryData<AccountsList>(KEY)!.accounts.map((a) => [a.id, a.order])).toEqual(order),
+  );
+  useUi.setState({ collapsed: new Set(), selGroup: null });
 });
 
 test("sign-in results: a lock-out is silent; the name shows only while names are visible", () => {

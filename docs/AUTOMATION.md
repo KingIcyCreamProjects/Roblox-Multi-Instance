@@ -41,6 +41,9 @@ settings (`ws.port`, `api.port`).
   data folder to another PC or user), RMI makes a new one and shows a toast. If
   the file or the keyring cannot be reached (for example a cancelled keyring
   prompt), the saved file is kept and the token is memory-only until RMI restarts.
+  If a regenerated token cannot be saved, the old saved token is deleted (it must
+  not come back), the new one lasts only until RMI restarts, and the next start
+  makes another new token, so scripts must be updated again.
 - **API families are off by default.** Each family has its own toggle in
   Settings, Automation: Read, Launch, Edit, Social, Secrets. A request to a
   family that is off gets `403 family_disabled`.
@@ -78,7 +81,7 @@ Messages are JSON, one per text frame:
 
 | type | data | effect |
 |---|---|---|
-| `hello` | `{ account, userId?, placeId?, jobId? }` | registers the client (also implied by the query string) |
+| `hello` | `{ account, userId?, placeId?, jobId? }` | registers the client (also implied by the query string). An `account` that differs from the query's moves this connection to that account; the old one shows disconnected |
 | `log` | `{ text, level? }` | appends to that account's console. `level` is `info` (default), `warn` or `error`; other short strings are kept and shown neutral |
 | `echo` | `{ text }` | broadcast to all other connected clients as `message` with `from` |
 | `ui.create` | `{ kind, name, value?, min?, max?, step?, decimals? }` | adds (or replaces, by `name`) a control in that account's panel. `kind` is `button`, `text`, `label`, `number` or `break` |
@@ -130,8 +133,10 @@ Examples:
 | code | meaning |
 |---|---|
 | 4401 | missing or wrong token |
-| 1013 | server full (64 connections, or 100 accounts already known), or this client was too slow to read and was dropped |
-| 1001 | server stopped or token regenerated |
+| 1013 | server full (64 connections, or 100 accounts known and none can be evicted: all connected or with auto-relaunch on), or this client was too slow to read and was dropped |
+| 1001 | server stopped (also when Automation is turned off or a port or LAN change rebinds it) or token regenerated |
+
+A message or frame over the 64 KiB limit drops the client without one of these codes.
 
 ## Local HTTP API
 
@@ -169,7 +174,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   http://127.0.0.1:7811/v1/accounts/Alice/launch
 ```
 
-Body fields (all optional): `placeId`, `jobId`, `privateLink`, `follow`.
+Body fields (all optional): `placeId`, `jobId`, `privateLink`, `follow`. A
+`jobId` needs a `placeId` (`400 bad_request` otherwise).
 Returns `202` with `{ "launchId": "<id>" }`. The launch is async. Ask for the
 truth:
 
@@ -189,7 +195,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
   http://127.0.0.1:7811/v1/accounts/import-cookie
 ```
 
-Both return the account.
+Both return the account. In a `PATCH`, a field sent as `null` clears it; a
+field left out stays as it is.
 
 ### Social family
 
@@ -232,8 +239,12 @@ Returns `{ "cookie": "..." }`. Logged on every call; RMI toasts each use.
 
 Account routes return `423 vault_locked` while the vault is locked.
 
-`GET /v1/launches/{id}` returns `{ launchId, accountId, state, message, gameName, done }`.
+`GET /v1/launches/{id}` returns `{ launchId, accountId, state, message, gameName, done, accounts }`.
+The top-level account fields are the latest event; `accounts` maps every account id in
+the batch to its own `{ state, message, gameName }`. Once `done` is true the reply also
+carries the counts `launched`, `failed` and `cancelled`.
 `state` is `queued`, `validating`, `launching`, `launched`, `failed` or `cancelled`.
+RMI keeps the last 200 batches (finished ones are dropped first); an older id returns `404`.
 
 ## Auto-relaunch
 
@@ -279,12 +290,15 @@ Every error has this shape:
 | 404 | `not_found` | no such endpoint, account or launch, or the account has no cookie saved |
 | 409 | `session_expired` | the account's Roblox session expired; sign in again in RMI |
 | 409 | `friend_paused` | launch refused: a friend disconnected this account through the friend remote; reconnect it first |
+| 409 | `handed_over` | launch refused: this account was handed to another computer with Run here |
 | 423 | `vault_locked` | unlock the vault in RMI first |
+| 429 | `too_many_launches` | launch refused: 50 launch batches started through the API are still queued or running; wait for some to finish |
 | 405 | `method_not_allowed` | known path, wrong method |
 | 408 | `timeout` | the request took longer than 30 s |
 | 413 | `too_large` | request body is over 2 MB |
+| 500 | `internal` | RMI failed inside (for example a background task died); retry |
 | 501 | `not_implemented` | not available in this version yet |
-| 502 | `roblox_error` | Roblox could not be reached while checking a cookie |
+| 502 | `roblox_error` | a Roblox call failed: could not be reached while checking a cookie, or a block, unblock, blocked-list or username lookup failed (rate limit, HTTP error) |
 | 503 | `starting` | RMI is still starting; retry |
 
 ## Limits

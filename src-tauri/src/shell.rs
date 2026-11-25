@@ -180,11 +180,16 @@ pub fn show_main(app: &AppHandle) {
         .is_ok()
     {
         let _ = app.emit_to("main", "tray://hint", ());
-        let st = app.state::<AppState>();
-        match crate::commands::persist(&st, &json!({ "onboarding": { "trayToastSeen": true } })) {
-            Ok(_) => crate::commands::state_changed(app, &["settings"]),
-            Err(e) => log::warn!("tray hint flag not saved: {e}"),
-        }
+        // Settings file write: off the calling (often main) thread.
+        let h = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let st = h.state::<AppState>();
+            match crate::commands::persist(&st, &json!({ "onboarding": { "trayToastSeen": true } }))
+            {
+                Ok(_) => crate::commands::state_changed(&h, &["settings"]),
+                Err(e) => log::warn!("tray hint flag not saved: {e}"),
+            }
+        });
     }
 }
 
@@ -215,7 +220,18 @@ async fn pause(app: &AppHandle) -> bool {
 async fn resume(app: &AppHandle, automation_was_running: bool) {
     crate::watcher::reconcile(app);
     if automation_was_running {
-        if let Err(e) = app.state::<AppState>().automation.start().await {
+        // Same short retry as at startup: the port may still be held for a moment.
+        let st = app.state::<AppState>();
+        let automation = &st.automation;
+        let mut r = automation.start().await;
+        for _ in 1..3 {
+            if r.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            r = automation.start().await;
+        }
+        if let Err(e) = r {
             log::error!("automation restart failed: {e}");
         }
     }
@@ -301,7 +317,7 @@ pub fn on_settings(app: &AppHandle, patch: &Value) -> CmdResult<()> {
             if let Err(e2) = crate::commands::persist(&app.state::<AppState>(), &fix) {
                 log::error!("launchOnLogin not reset: {e2}");
             }
-            return Err(format!("Start on login could not be changed: {e}"));
+            return Err(crate::commands::AUTOSTART_FAILED.into()); // details logged above
         }
     }
     if patch.pointer("/updates/auto") == Some(&Value::Bool(true)) {
@@ -400,7 +416,8 @@ fn login_launch(app: &AppHandle) {
                 continue;
             }
             let h2 = h.clone();
-            // Tracker ids with a client up; `None` while locked (wait for the unlock).
+            // Tracker ids with a client up; `None` while locked (wait for the unlock) or when
+            // the process list could not be read (ask again: unknown is not "none run").
             let live = tauri::async_runtime::spawn_blocking(move || {
                 let st = h2.state::<AppState>();
                 let trackers: Vec<String> = {
@@ -408,7 +425,7 @@ fn login_launch(app: &AppHandle) {
                     let all = g.as_ref()?.payload().accounts.iter();
                     all.map(|a| a.tracker_id.clone()).collect()
                 };
-                let clients = st.platform.tracked_clients(&trackers);
+                let clients = st.platform.tracked_clients(&trackers)?;
                 Some(clients.into_iter().map(|(_, t)| t).collect::<Vec<String>>())
             })
             .await
@@ -645,14 +662,25 @@ async fn install(app: &AppHandle, at_start: bool) -> CmdResult<()> {
         }
         return Err("a launch is running; the update waits for the next start".into());
     }
-    // Set before install: Windows relaunches from inside it.
-    just_installed(&app, true, at_start);
-    if let Err(e) = u.install(bytes) {
-        just_installed(&app, false, false);
+    // Settings write and installer run block: off the async workers.
+    let a = app.clone();
+    let done = tauri::async_runtime::spawn_blocking(move || {
+        // Set before install: Windows relaunches from inside it.
+        just_installed(&a, true, at_start);
+        let r = u.install(bytes);
+        if r.is_err() {
+            just_installed(&a, false, false);
+        }
+        r
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))
+    .and_then(|r| r.map_err(fail));
+    if let Err(m) = done {
         if cfg!(windows) {
             resume(&app, was_running).await;
         }
-        return Err(fail(e));
+        return Err(m);
     }
     app.restart()
 }

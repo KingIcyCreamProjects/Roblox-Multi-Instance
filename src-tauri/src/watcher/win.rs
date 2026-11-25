@@ -5,7 +5,7 @@ use super::{
     logparse::{LogRules, Srv},
     persist_rect, pick_log,
     rules::{cooldown_open, decide, is_game_title, keep_skipped, rejoin, Cfg, Rejoin, Snap},
-    tracker_from_cmdline, AccountLookup, Action, ClientInfo, VaultLookup, PROCESS_NAME,
+    tracker_from_cmdline, AccountLookup, ClientInfo, VaultLookup, PROCESS_NAME,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -323,6 +323,7 @@ pub fn spawn_retitle(app: AppHandle) {
                 .collect(),
             None => continue,
         };
+        // catch_unwind: debug builds only (release aborts on panic).
         if !accounts.is_empty()
             && std::panic::catch_unwind(|| sys::retitle_all(&accounts, hidden)).is_err()
         {
@@ -385,6 +386,9 @@ struct Track {
     log_pos: u64,
     /// The log has been read and had content.
     evidence: bool,
+    /// The first read skipped the log's start (a long log): a join may sit in the part not
+    /// read, so an `Unknown` state there is no evidence of "no server".
+    cut: bool,
     rect: Option<[i32; 4]>,
     /// A window titled "Roblox"/expected was seen (past the loading splash).
     game_title_seen: bool,
@@ -403,12 +407,20 @@ struct Track {
 }
 
 impl Track {
+    /// The log can show "no server": read with content, this client's own (`log_settled`),
+    /// not a home-screen launch, and not a cut log still `Unknown` (it may have joined in
+    /// the part not read).
+    fn no_server_evidence(&self, home: bool) -> bool {
+        self.evidence && self.log_settled && !home && !(self.cut && self.srv == Srv::Unknown)
+    }
+
     /// A new log guess: everything read from the old log goes with it.
     fn repick(&mut self, log: Option<PathBuf>, settled: bool, started: i64) {
         self.log = log;
         self.log_settled = settled;
         self.log_pos = 0;
         self.evidence = false;
+        self.cut = false;
         self.srv = Srv::Unknown;
         self.idle_since = started;
         self.last_event = None;
@@ -473,9 +485,11 @@ fn log_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Complete new lines since `*pos` (a partial last line waits for the next scan). A
-/// first read of a huge log only takes its last MiB.
-fn read_new(p: &Path, pos: &mut u64) -> Option<String> {
+/// Complete new lines since `*pos` (a partial last line waits for the next scan), and
+/// whether this read skipped the start of the log: a first read of a huge log only takes its
+/// last MiB. At most `READ_CAP` per read; a line longer than that is skipped.
+fn read_new(p: &Path, pos: &mut u64) -> Option<(String, bool)> {
+    const READ_CAP: u64 = 4 << 20;
     let mut f = std::fs::File::open(p).ok()?;
     let len = f.metadata().ok()?.len();
     if len < *pos {
@@ -486,12 +500,18 @@ fn read_new(p: &Path, pos: &mut u64) -> Option<String> {
     } else {
         *pos
     };
+    let cut = *pos == 0 && from > 0;
     f.seek(SeekFrom::Start(from)).ok()?;
+    let n = (len - from).min(READ_CAP);
     let mut b = Vec::new();
-    f.take(len - from).read_to_end(&mut b).ok()?;
+    f.take(n).read_to_end(&mut b).ok()?;
     let end = b.iter().rposition(|c| *c == b'\n').map_or(0, |i| i + 1);
+    if end == 0 && b.len() as u64 == READ_CAP {
+        *pos = from + READ_CAP; // no newline in a full read: never re-read it every scan
+        return Some((String::new(), cut));
+    }
     *pos = from + end as u64;
-    Some(String::from_utf8_lossy(&b[..end]).into_owned())
+    Some((String::from_utf8_lossy(&b[..end]).into_owned(), cut))
 }
 
 /// Player/crash logs with creation time in ms.
@@ -592,6 +612,7 @@ impl Scanner {
                     log_settled: false,
                     log_pos: 0,
                     evidence: false,
+                    cut: false,
                     rect: None,
                     game_title_seen: false,
                     close_failed: None,
@@ -690,7 +711,8 @@ impl Scanner {
             // Locked vault: no names on screen, even cached ones.
             let shown = t.account.as_ref().filter(|_| unlocked);
             let mut reason = None;
-            if let Some(text) = t.log.as_deref().and_then(|p| read_new(p, &mut t.log_pos)) {
+            if let Some((text, cut)) = t.log.as_deref().and_then(|p| read_new(p, &mut t.log_pos)) {
+                t.cut |= cut;
                 t.evidence |= !text.is_empty();
                 let (join, r, marked) = super::logparse::rejoin_events(&text);
                 t.marked |= marked;
@@ -757,13 +779,24 @@ impl Scanner {
             let backoff = t
                 .close_failed
                 .is_some_and(|f| t_now - f < RETRY_FAILED_CLOSE_SECS);
-            let paused = t
-                .account
-                .as_ref()
-                .is_some_and(|(id, _)| super::friend_paused(&st, id));
+            // Handed over: another computer runs it now, so no rejoin here either.
+            let paused = t.account.as_ref().is_some_and(|(id, _)| {
+                super::friend_paused(&st, id) || st.automation.handed_over(id)
+            });
             if paused {
-                // Drop it: a later unpause must not fire a stale rejoin.
+                // Drop it: a later unpause or take-back must not fire a stale rejoin.
                 t.reason = None;
+            }
+            // Kicked because the account joined elsewhere (another device, a hand-over):
+            // auto-relaunch must not start it here again and kick that session in turn.
+            if let (Some(r), Some((_, name))) = (reason, t.account.as_ref()) {
+                if super::rules::joined_elsewhere(r) {
+                    st.automation
+                        .relaunch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .quiet(name);
+                }
             }
             // Home-screen clients are never closed and relaunched as dropped either.
             if let (true, Some(r), Some((id, name)), Some(tr), false) = (
@@ -802,10 +835,16 @@ impl Scanner {
                         if keep_skipped(r, unlocked) {
                             t.reason = Some(r);
                         }
-                        if reason.is_some() {
-                            log::info!("watcher: not reconnecting {name}: {why}");
+                        // Locked: the cached name stays out of the log.
+                        let who = if unlocked {
+                            name.clone()
                         } else {
-                            log::debug!("watcher: not reconnecting {name} yet: {why}");
+                            format!("pid {pid}")
+                        };
+                        if reason.is_some() {
+                            log::info!("watcher: not reconnecting {who}: {why}");
+                        } else {
+                            log::debug!("watcher: not reconnecting {who} yet: {why}");
                         }
                     }
                     Rejoin::Go { .. } if !dest() => {
@@ -871,7 +910,7 @@ impl Scanner {
                 joined: t.srv == Srv::Joined,
                 // A home-screen client (empty Play bar) is never judged for No server: it
                 // has none on purpose, before and after any game it joins from there.
-                evidence: t.evidence && t.log_settled && !home,
+                evidence: t.no_server_evidence(*home),
                 left: matches!(t.srv, Srv::Left | Srv::Disconnected),
                 proven: self.proven,
                 idle_s: (t_now - t.idle_since).max(0) as u64,
@@ -894,11 +933,11 @@ impl Scanner {
             {
                 continue;
             }
-            let acct = t.account.as_ref().map(|a| a.0.clone());
             // Unmapped clients get their own key so they are throttled too.
-            let key = acct
-                .clone()
-                .unwrap_or_else(|| format!("pid:{pid}:{started}"));
+            let key = t
+                .account
+                .as_ref()
+                .map_or_else(|| format!("pid:{pid}:{started}"), |a| a.0.clone());
             if !cooldown_open(
                 super::lock(&w.shared).fires.entry(key.clone()).or_default(),
                 t_now,
@@ -910,19 +949,12 @@ impl Scanner {
             match close_verified(*pid, *started) {
                 Ok(true) => {
                     // Only a successful close counts toward the cooldown.
-                    let count = {
-                        let mut sh = super::lock(&w.shared);
-                        let h = sh.fires.entry(key).or_default();
-                        h.push(t_now);
-                        h.len() as u32
-                    };
-                    fired.push(Action {
-                        account_id: acct,
-                        pid: *pid,
-                        rule: rule.id(),
-                        at: t_now,
-                        count,
-                    })
+                    super::lock(&w.shared)
+                        .fires
+                        .entry(key)
+                        .or_default()
+                        .push(t_now);
+                    fired.push((rule.id(), t_now));
                 }
                 Ok(false) => {
                     t.close_failed = Some(t_now);
@@ -952,15 +984,10 @@ impl Scanner {
                 return;
             }
             sh.clients = infos;
-            for a in &fired {
-                sh.last_fired.insert(a.rule, a.at);
-            }
+            sh.last_fired.extend(fired.iter().copied());
         }
         if !fired.is_empty() {
             crate::commands::state_changed(app, &["watcherStatus"]);
-        }
-        for a in fired {
-            let _ = w.tx.send(a);
         }
     }
 
@@ -986,7 +1013,15 @@ fn emit_rect(app: &AppHandle, cfg: &Cfg, t: &Track) {
 }
 
 pub async fn run(app: AppHandle, epoch: Arc<AtomicU64>, my: u64, wake: Arc<tokio::sync::Notify>) {
-    let (rules, src) = LogRules::load(&app.state::<crate::AppState>().paths.root);
+    // File read: off the async workers.
+    let root = app.state::<crate::AppState>().paths.root.clone();
+    let Ok((rules, src)) =
+        tauri::async_runtime::spawn_blocking(move || LogRules::load(&root)).await
+    else {
+        log::error!("watcher: rules load failed; stopping");
+        app.state::<crate::AppState>().watcher.ended(my);
+        return;
+    };
     log::info!("watcher: started ({src} rules)");
     let mut sc = Scanner {
         sys: System::new(),
@@ -1000,6 +1035,7 @@ pub async fn run(app: AppHandle, epoch: Arc<AtomicU64>, my: u64, wake: Arc<tokio
         let a = app.clone();
         let Ok(back) = tauri::async_runtime::spawn_blocking(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sc.scan(&a)));
+            // Debug builds only: release builds abort on panic (Cargo.toml `panic = "abort"`).
             if r.is_err() {
                 // A track may be half-updated: start every client over next scan.
                 sc.tracks.clear();
@@ -1043,17 +1079,32 @@ mod tests {
         let p = d.path().join("l.log");
         std::fs::write(&p, "a\nb\npart").unwrap();
         let mut pos = 0;
-        assert_eq!(read_new(&p, &mut pos).unwrap(), "a\nb\n");
-        assert_eq!(read_new(&p, &mut pos).unwrap(), "");
+        let read = |pos: &mut u64| read_new(&p, pos).unwrap().0;
+        assert_eq!(read(&mut pos), "a\nb\n");
+        assert_eq!(read(&mut pos), "");
         std::fs::OpenOptions::new()
             .append(true)
             .open(&p)
             .unwrap()
             .write_all(b"ial\nc\n")
             .unwrap();
-        assert_eq!(read_new(&p, &mut pos).unwrap(), "partial\nc\n");
+        assert_eq!(read(&mut pos), "partial\nc\n");
         std::fs::write(&p, "z\n").unwrap(); // rotated/truncated
-        assert_eq!(read_new(&p, &mut pos).unwrap(), "z\n");
+        assert_eq!(read(&mut pos), "z\n");
+        assert!(!read_new(&p, &mut 0).unwrap().1, "small log: read whole");
+    }
+
+    #[test]
+    fn read_new_skips_a_line_longer_than_the_cap() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("long.log");
+        std::fs::write(&p, "a\n").unwrap();
+        let mut pos = 0;
+        read_new(&p, &mut pos).unwrap();
+        let body = "a\n".to_string() + &"x".repeat(5 << 20);
+        std::fs::write(&p, &body).unwrap();
+        assert_eq!(read_new(&p, &mut pos).unwrap().0, "");
+        assert_eq!(pos, 2 + (4 << 20), "moved past it, not re-read every scan");
     }
 
     #[test]
@@ -1064,11 +1115,28 @@ mod tests {
         let body = line.repeat(1100) + "last\n";
         std::fs::write(&p, &body).unwrap();
         let mut pos = 0;
-        let got = read_new(&p, &mut pos).unwrap();
+        let (got, cut) = read_new(&p, &mut pos).unwrap();
+        assert!(cut, "the start was skipped");
         assert!(!got.is_empty() && got.len() <= 1 << 20);
         assert!(got.ends_with("last\n"));
         assert_eq!(pos, body.len() as u64);
-        assert_eq!(read_new(&p, &mut pos).unwrap(), "");
+        assert_eq!(read_new(&p, &mut pos).unwrap(), (String::new(), false));
+    }
+
+    #[test]
+    fn a_cut_log_still_unknown_is_no_evidence_of_no_server() {
+        use crate::watcher::logparse::Srv;
+        let mut t = track(None, None, false);
+        (t.srv, t.cut) = (Srv::Unknown, false);
+        assert!(t.no_server_evidence(false), "whole log, no join: evidence");
+        t.cut = true;
+        assert!(
+            !t.no_server_evidence(false),
+            "join may be in the part not read"
+        );
+        t.srv = Srv::Left;
+        assert!(t.no_server_evidence(false), "a leave seen since: evidence");
+        assert!(!t.no_server_evidence(true), "home-screen launch");
     }
 
     #[test]
@@ -1144,6 +1212,7 @@ mod tests {
             log_settled: true,
             log_pos: 42,
             evidence: true,
+            cut: true,
             rect: Some([1, 2, 3, 4]),
             game_title_seen: true,
             close_failed: None,
@@ -1188,8 +1257,8 @@ mod tests {
         t.repick(None, false, 500);
         assert!(t.log.is_none() && !t.log_settled);
         assert_eq!(
-            (t.log_pos, t.evidence, t.srv),
-            (0, false, crate::watcher::logparse::Srv::Unknown)
+            (t.log_pos, t.evidence, t.cut, t.srv),
+            (0, false, false, crate::watcher::logparse::Srv::Unknown)
         );
         assert_eq!(t.idle_since, 500);
         assert_eq!(t.last_event, None);

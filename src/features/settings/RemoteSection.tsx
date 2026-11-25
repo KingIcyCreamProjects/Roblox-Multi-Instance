@@ -32,7 +32,7 @@ export const size = (b: number) =>
       ? mb.format(b / 1e6)
       : b >= 1e3
         ? kb.format(b / 1e3)
-        : `${b} B`;
+        : t("rs.bytes", { n: b });
 
 type Log = RemoteStatus["log"][number];
 
@@ -72,7 +72,23 @@ export function RemoteExtras() {
   const [code, setCode] = useState<{ code: string; until: number } | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [err, setErr] = useState<string | null>(null);
+  /** the action in flight ("code", "stop" or a paired id): every action button waits */
+  const [busy, setBusy] = useState<string | null>(null);
+  /** paired id whose Remove waits for a yes */
+  const [asking, setAsking] = useState<string | null>(null);
   const refresh = () => void qc.invalidateQueries({ queryKey: ["remoteStatus"] });
+  /** One action at a time; a failure is shown under Pairing, the status refetched either way. */
+  const act = (key: string, run: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(key);
+    setErr(null);
+    void run()
+      .catch((e: unknown) => setErr(errMessage(e)))
+      .finally(() => {
+        setBusy(null);
+        refresh();
+      });
+  };
 
   // the code counts down while shown and disappears when it expires
   useEffect(() => {
@@ -94,17 +110,15 @@ export function RemoteExtras() {
     if (codeLive === false) setCode(null);
   }, [codeLive]);
 
+  // the refresh after it: codeLive turns true, so its later false hides the code
   const showCode = () =>
-    void call("remote_pair_code").then(
-      (c) => {
-        setErr(null);
+    act("code", () =>
+      call("remote_pair_code").then((c) => {
         // one reading for both: a millisecond between two would show 5:01 for a 5:00 code
         const at = Date.now();
         setNow(at);
         setCode({ code: c.code, until: at + c.expiresInSec * 1000 });
-        refresh(); // codeLive turns true, so its later false hides the code
-      },
-      (e) => setErr(errMessage(e)),
+      }),
     );
 
   const statusText = !saved
@@ -140,7 +154,12 @@ export function RemoteExtras() {
           <p className="flex-1 text-13 text-text-1">
             {t(st.session.control ? "rs.liveControl" : "rs.liveView", { peer: st.session.peer })}
           </p>
-          <Button sm variant="danger" onClick={() => void call("remote_stop").then(refresh)}>
+          <Button
+            sm
+            variant="danger"
+            disabled={!!busy}
+            onClick={() => act("stop", () => call("remote_stop"))}
+          >
             {t("rs.stop")}
           </Button>
         </div>
@@ -149,7 +168,7 @@ export function RemoteExtras() {
       <SubHeading>{t("rs.pairing")}</SubHeading>
       <p className="text-13 text-text-2">{t("rs.pairing.d")}</p>
       <div className="mt-2 flex flex-wrap items-center gap-3">
-        <Button sm disabled={!saved} onClick={showCode}>
+        <Button sm disabled={!saved || !!busy} onClick={showCode}>
           {code ? t("rs.newCode") : t("rs.showCode")}
         </Button>
         {!saved && <span className="text-13 text-text-3">{t("rs.saveFirst")}</span>}
@@ -178,18 +197,46 @@ export function RemoteExtras() {
       <ul className="-mx-3">
         {st?.paired.map((p) => (
           <li key={p.id} className={clsx("flex items-center justify-between gap-6", listRowCls)}>
-            <div className="min-w-0">
-              <p className="truncate text-14 text-text-1">{p.name}</p>
-              <p className="text-12 text-text-3">{t("rs.pairedAt", { when: when(p.pairedAt) })}</p>
-            </div>
-            <Button
-              sm
-              variant="ghost"
-              aria-label={t("rs.removeNamed", { name: p.name })}
-              onClick={() => void call("remote_unpair", { id: p.id }).then(refresh)}
-            >
-              {t("rs.remove")}
-            </Button>
+            {asking === p.id ? (
+              // the same inline confirm as the Devices page
+              <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+                <span role="status" className="mr-auto min-w-0 text-13 text-text-2">
+                  {t("rs.removeAsk", { name: p.name })}
+                </span>
+                <Button
+                  sm
+                  variant="danger"
+                  disabled={!!busy}
+                  onClick={() => {
+                    setAsking(null);
+                    act(p.id, () => call("remote_unpair", { id: p.id }));
+                  }}
+                >
+                  {t("rs.remove")}
+                </Button>
+                <Button autoFocus sm variant="ghost" onClick={() => setAsking(null)}>
+                  {t("set.cancel")}
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="min-w-0">
+                  <p className="truncate text-14 text-text-1">{p.name}</p>
+                  <p className="text-12 text-text-3">
+                    {t("rs.pairedAt", { when: when(p.pairedAt) })}
+                  </p>
+                </div>
+                <Button
+                  sm
+                  variant="ghost"
+                  aria-label={t("rs.removeNamed", { name: p.name })}
+                  disabled={!!busy}
+                  onClick={() => setAsking(p.id)}
+                >
+                  {t("rs.remove")}
+                </Button>
+              </>
+            )}
           </li>
         ))}
       </ul>

@@ -79,7 +79,7 @@ const HEADERS: [SortKey, MsgKey][] = [
   ["kind", "servers.col.type"],
 ];
 
-const menuContent = "menu z-50 min-w-[220px] glass rounded-panel p-1 text-13 text-text-1";
+const menuContent = "menu z-50 min-w-[13.75rem] glass rounded-panel p-1 text-13 text-text-1";
 const menuItem =
   "flex h-8 cursor-default items-center gap-2 rounded-chip px-2.5 outline-none select-none focus-visible:shadow-none data-[highlighted]:bg-surface-4 data-[disabled]:text-text-3";
 
@@ -202,7 +202,9 @@ export function Servers() {
     toast(t("servers.serverSet"));
   };
   const join = (r: ServerRow) => {
-    if (launchBusy()) return void toast(t("launch.busy")); // before the bar changes
+    // before the bar changes: a refused launch must not leave the server in it
+    const why = launchBlocked(qc) ?? (launchBusy() ? t("launch.busy") : null);
+    if (why) return void toast(why);
     toBar(r.jobId);
     play(selIds, { here: true });
   };
@@ -243,7 +245,8 @@ export function Servers() {
       const got = await call("servers_regions", { placeId: rowsPlace, jobIds, accountId: account });
       if (epoch === regionsEpoch.current) setRegions((r) => ({ ...r, ...got }));
     } catch (e) {
-      reportError(e);
+      // a load from before a refresh or place change is stale: its error too
+      if (epoch === regionsEpoch.current) reportError(e);
     } finally {
       if (regionsLoading.current === epoch) {
         regionsLoading.current = null;
@@ -286,7 +289,7 @@ export function Servers() {
       toBar(row.jobId);
     } else if (row && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
       e.preventDefault();
-      void copyText(row.jobId, t("servers.col.jobId"));
+      void copyText(row.jobId, t("copy.jobId"));
     }
   };
 
@@ -331,7 +334,7 @@ export function Servers() {
           >
             {find.running ? (
               <>
-                <X size={14} strokeWidth={2} />
+                <X size={14} strokeWidth={1.75} />
                 {t("servers.find.cancel")}
               </>
             ) : (
@@ -397,7 +400,7 @@ export function Servers() {
               {t("servers.setServer")}
             </Button>
             <Button disabled={!selIds.length} onClick={() => join(row)}>
-              <Play size={14} strokeWidth={2} />
+              <Play size={14} strokeWidth={1.75} />
               {selIds.length > 1 ? t("servers.joinN", { n: selIds.length }) : t("servers.join")}
             </Button>
             <Button
@@ -408,10 +411,7 @@ export function Servers() {
               {t("servers.reserveJoin")}
             </Button>
             <div className="flex flex-wrap gap-1">
-              <Button
-                variant="ghost"
-                onClick={() => void copyText(row.jobId, t("servers.col.jobId"))}
-              >
+              <Button variant="ghost" onClick={() => void copyText(row.jobId, t("copy.jobId"))}>
                 <Copy size={14} strokeWidth={1.75} />
                 {t("servers.copyJob")}
               </Button>
@@ -429,7 +429,8 @@ export function Servers() {
           </div>
         </>
       ) : (
-        <PanelEmpty>{t("discover.pick")}</PanelEmpty>
+        // nothing to pick before a lookup: the list's prompt says what to do
+        list.rows.length > 0 && <PanelEmpty>{t("discover.pick")}</PanelEmpty>
       )}
       <div className="mt-auto border-t border-hairline pt-4">{findForm}</div>
     </>
@@ -483,9 +484,9 @@ export function Servers() {
               className="bg-surface-3"
             >
               {list.streaming ? (
-                <Square size={12} strokeWidth={2.5} fill="currentColor" />
+                <Square size={12} strokeWidth={1.75} fill="currentColor" />
               ) : (
-                <RefreshCw size={14} strokeWidth={2} />
+                <RefreshCw size={14} strokeWidth={1.75} />
               )}
             </IconButton>
             {/* announce once, when the stream ends, not on every page or filter change */}
@@ -645,9 +646,9 @@ export function Servers() {
                           {t(label)}
                           {on &&
                             (sort.dir === "asc" ? (
-                              <ArrowUp size={12} strokeWidth={2} />
+                              <ArrowUp size={12} strokeWidth={1.75} />
                             ) : (
-                              <ArrowDown size={12} strokeWidth={2} />
+                              <ArrowDown size={12} strokeWidth={1.75} />
                             ))}
                         </button>
                       </div>
@@ -713,7 +714,7 @@ export function Servers() {
                   <ContextMenu.Separator className="mx-2 my-1 h-px bg-hairline" />
                   <ContextMenu.Item
                     className={menuItem}
-                    onSelect={() => void copyText(row.jobId, t("servers.col.jobId"))}
+                    onSelect={() => void copyText(row.jobId, t("copy.jobId"))}
                   >
                     {t("servers.copyJob")}
                   </ContextMenu.Item>

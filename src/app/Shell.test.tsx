@@ -27,7 +27,12 @@ test("tabs hide Automation unless enabled", () => {
 });
 
 test("shell applies theme from settings and shows empty state", async () => {
-  wrap(<Shell />);
+  // App owns useApplyAppearance; the Shell renders inside it
+  function InApp() {
+    useApplyAppearance();
+    return <Shell />;
+  }
+  wrap(<InApp />);
   await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
   expect(screen.getByText(t("empty.signIn"))).toBeInTheDocument();
 });
@@ -139,4 +144,17 @@ test("Ctrl+Shift+H toggles privacy once settings have loaded", async () => {
   await waitFor(() =>
     expect(mockVault.lastArgs.settings_set).toEqual({ patch: { ui: { showUsernames: false } } }),
   );
+});
+
+// Keep last: resetModules gives later dynamic imports a fresh store the static Shell doesn't use.
+test("opens on the first saved tab, skipping Automation while it is off", async () => {
+  vi.resetModules(); // `start` (once per app start) is module state
+  const { call } = await import("@/lib/ipc");
+  await call("settings_set", {
+    patch: { ui: { tabOrder: ["automation", "discover", "home"] }, automation: { enabled: false } },
+  });
+  const { useUi } = await import("./store");
+  const { Shell: Fresh } = await import("./Shell");
+  wrap(<Fresh />);
+  await waitFor(() => expect(useUi.getState().route).toBe("discover"));
 });

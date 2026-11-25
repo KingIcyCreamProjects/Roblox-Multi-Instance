@@ -179,7 +179,7 @@ pub fn rejoin(reason: u32, unlocked: bool, hist: &mut Vec<i64>, now: i64) -> Rej
 }
 
 /// 264/273/276: the account joined from somewhere else (another device or app).
-fn joined_elsewhere(reason: u32) -> bool {
+pub(super) fn joined_elsewhere(reason: u32) -> bool {
     matches!(reason, 264 | 273 | 276)
 }
 

@@ -115,10 +115,11 @@ pub fn close_session_windows(app: &AppHandle) -> usize {
 }
 
 /// Tauri's app cache dir (portable: `<data>/cache/login`); never inside the asset scope
-/// (`cache/thumbs`). Temp as a fallback.
+/// (`cache/thumbs`). Temp as a fallback. An isolated debug instance (`RMI_DATA_DIR`) keeps
+/// its own, so startup cleanup never sweeps the installed app's sign-in profiles.
 pub(crate) fn base_dir(app: &AppHandle) -> PathBuf {
     let st = app.state::<AppState>();
-    if st.portable {
+    if st.portable || crate::paths::override_dir().is_some() {
         return st.paths.cache.join("login");
     }
     app.path()
@@ -204,11 +205,12 @@ async fn poll(
     let url: tauri::Url = COOKIE_URL.parse().expect("valid url");
     // async task, not the main thread: cookies_for_url deadlocks there on Windows
     let r = loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        // A lock while the window was being built missed it: close it now (below).
+        // A lock while the window was being built missed it: close it now (below), before
+        // the first wait. A later lock destroys the window, caught just below.
         if !start_gen.current(&app.state::<AppState>().lock_gen) {
             break Err(WAS_LOCKED.into());
         }
+        tokio::time::sleep(Duration::from_secs(1)).await;
         let Some(w) = app.get_webview_window(&label) else {
             // a lock destroys the window too: report that, not "cancelled"
             break Err(if start_gen.current(&app.state::<AppState>().lock_gen) {

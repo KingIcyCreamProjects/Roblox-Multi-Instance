@@ -64,7 +64,31 @@ pub fn check_plain_confirm(confirm: &str) -> std::result::Result<(), String> {
 
 /// Plaintext JSON of the payload (build under the vault lock, write after releasing it).
 pub fn plain_json(v: &Vault) -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(serde_json::to_vec_pretty(v.payload()).expect("payload serializes"))
+    json_wiped(v.payload(), true)
+}
+
+/// JSON in one exactly sized buffer, wiped on drop. A growing `Vec` frees each outgrown
+/// copy (partial plaintext with cookies) without zeroing it, so size it first.
+pub(crate) fn json_wiped<T: Serialize>(v: &T, pretty: bool) -> Zeroizing<Vec<u8>> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let write = |w: &mut dyn std::io::Write| match pretty {
+        true => serde_json::to_writer_pretty(w, v),
+        false => serde_json::to_writer(w, v),
+    };
+    let mut n = Count(0);
+    write(&mut n).expect("serializes");
+    let mut out = Zeroizing::new(Vec::with_capacity(n.0));
+    write(&mut *out).expect("serializes");
+    out
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,7 +110,7 @@ pub fn cache_write(path: &Path, os: &dyn OsWrap, dk: &[u8; 32], now: i64) -> Res
         dk_b64: B64.encode(dk),
         expires_unix: now + REMEMBER_SECS,
     };
-    let json = Zeroizing::new(serde_json::to_vec(&c).expect("cache serializes"));
+    let json = json_wiped(&c, false);
     let file = [&c.expires_unix.to_le_bytes()[..], &os.wrap(&json)?].concat();
     store::write_atomic(path, &file, store::Backup::Skip)
 }
@@ -214,7 +238,12 @@ fn clients_running(st: &crate::AppState) -> bool {
                 .collect()
         })
         .unwrap_or_default();
-    !trackers.is_empty() && !st.platform.tracked_clients(&trackers).is_empty()
+    // An unreadable process list is unknown, not "none run": they may still need the vault.
+    !trackers.is_empty()
+        && st
+            .platform
+            .tracked_clients(&trackers)
+            .is_none_or(|c| !c.is_empty())
 }
 
 /// Every 5 s: lock on idle > `vault.autoLockMin` (0 = never), or, with `vault.lockOnSleep`,
@@ -448,12 +477,8 @@ mod tests {
             fn open_uri(&self, _: &str) -> std::io::Result<()> {
                 Ok(())
             }
-            fn tracked_pids(&self, t: &str) -> Vec<u32> {
-                if t == "77" {
-                    vec![1]
-                } else {
-                    vec![]
-                }
+            fn tracked_pids(&self, t: &str) -> Option<Vec<u32>> {
+                Some(if t == "77" { vec![1] } else { vec![] })
             }
         }
         let d = tempfile::tempdir().unwrap();

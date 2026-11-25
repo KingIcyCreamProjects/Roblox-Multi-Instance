@@ -6,7 +6,16 @@ import reactHooks from "eslint-plugin-react-hooks";
 export default tseslint.config(
   // public/remote-viewer: HomeLab's file, copied byte for byte (tools/sync-remote-viewer.mjs)
   {
-    ignores: ["dist", "e2e/.drivers", "src-tauri", "node_modules", "docs", "public/remote-viewer"],
+    // .claude: nested worktrees (each its own tsconfig root) and agent tooling
+    ignores: [
+      "dist",
+      "e2e/.drivers",
+      "src-tauri",
+      "node_modules",
+      "docs",
+      "public/remote-viewer",
+      ".claude",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

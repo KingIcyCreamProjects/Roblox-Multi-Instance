@@ -52,10 +52,10 @@ pub async fn change_password(
 ) -> Result<Option<Secret>> {
     let mut b = json!({"currentPassword": current, "newPassword": next});
     let r = c
-        .post_json_rotating::<Value>("auth", "/v2/user/passwords/change", &b, ck)
+        .post_rotating("auth", "/v2/user/passwords/change", &b, ck)
         .await;
     wipe_value(&mut b);
-    Ok(r?.1)
+    r
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,15 +104,13 @@ pub async fn set_privacy(c: &RobloxClient, ck: &Secret, patch: &Value) -> Result
 
 /// Signs out every other session; returns the new cookie Roblox issues for this one.
 pub async fn signout_others(c: &RobloxClient, ck: &Secret) -> Result<Option<Secret>> {
-    let (_, n): (Value, _) = c
-        .post_json_rotating(
-            "auth",
-            "/v1/logoutfromallsessionsandreauthenticate",
-            &json!({}),
-            ck,
-        )
-        .await?;
-    Ok(n)
+    c.post_rotating(
+        "auth",
+        "/v1/logoutfromallsessionsandreauthenticate",
+        &json!({}),
+        ck,
+    )
+    .await
 }
 
 pub async fn block(c: &RobloxClient, ck: &Secret, user_id: u64, on: bool) -> Result<()> {

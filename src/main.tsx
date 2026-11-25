@@ -11,6 +11,8 @@ import "./styles/index.css";
 
 // The "being controlled" bar (its own small window, see src-tauri/src/remote) renders alone.
 const indicator = location.hash === "#remote-indicator";
+// an opaque window: index.css gives it a flat base instead of the dev build's fake desktop
+if (indicator) document.documentElement.dataset.indicator = "";
 
 // Native window: acrylic is behind the page. Browser dev build: CSS fakes it (see .app-win).
 if (inTauri && !indicator) {

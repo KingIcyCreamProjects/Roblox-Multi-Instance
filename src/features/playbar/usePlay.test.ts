@@ -1,4 +1,31 @@
-import { barOf, clearPlaceholder, launchBusy, useLaunch } from "./usePlay";
+import { waitFor } from "@testing-library/react";
+import { useToasts } from "@/components/Toasts";
+import { KEY } from "@/features/accounts/useAccounts";
+import * as ipc from "@/lib/ipc";
+import { t } from "@/lib/i18n";
+import { queryClient } from "@/lib/queryClient";
+import { lastLaunchSet, saveLaunchSet, usePlayBar } from "./store";
+import { barOf, clearPlaceholder, launchBusy, play, useLaunch } from "./usePlay";
+
+test("a start Rust refuses, or only pending accounts, leaves the bar and last set alone", async () => {
+  useToasts.setState({ items: [] });
+  saveLaunchSet(["old"]);
+  usePlayBar.setState({ destination: "111", server: "", mode: "any" });
+  const spy = vi.spyOn(ipc, "call").mockRejectedValue(new Error("launch_start: LAUNCH_BUSY"));
+  play(["a"], { here: true, dest: "999", mode: "smallest" });
+  await waitFor(() => expect(useLaunch.getState().batch).toBeNull());
+  expect(usePlayBar.getState()).toMatchObject({ destination: "111", mode: "any" });
+  expect(lastLaunchSet()).toEqual(["old"]);
+  expect(spy.mock.calls[0][1]).toMatchObject({ bar: { destination: "999", mode: "smallest" } });
+  spy.mockClear();
+  queryClient.setQueryData(KEY, { accounts: [{ id: "p", session: "pending" }] });
+  play(["p"]);
+  expect(spy).not.toHaveBeenCalled();
+  expect(useToasts.getState().items.at(-1)?.message).toBe(t("session.pendingLong"));
+  queryClient.removeQueries({ queryKey: KEY });
+  usePlayBar.setState({ destination: "" });
+  vi.restoreAllMocks();
+});
 
 test("a settled (done) batch does not block the next play", () => {
   const b = { id: "b1", ids: ["a"], done: null };

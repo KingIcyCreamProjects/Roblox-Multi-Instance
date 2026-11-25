@@ -141,7 +141,7 @@ pub fn safe_name(raw: &str) -> String {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or_default();
     let s: String = base
         .chars()
-        .filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c))
+        .filter(|c| !c.is_control() && !super::invisible(*c) && !"<>:\"|?*".contains(*c))
         .collect();
     let s = s.trim().trim_end_matches(['.', ' ']);
     let (stem, ext) = split_ext(s);
@@ -261,7 +261,17 @@ impl Files {
     }
 
     fn say(&self, m: Message) {
-        let _ = self.out.try_send(m);
+        // a full queue (slow link) must not lose a transfer's end: wait for room off this task,
+        // a few seconds at most (the session's own send limit). Each `say` is the last word on
+        // one transfer, so their order between transfers does not matter.
+        if let Err(mpsc::error::TrySendError::Full(m)) = self.out.try_send(m) {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let out = self.out.clone();
+                rt.spawn(async move {
+                    let _ = tokio::time::timeout(super::SEND_WAIT, out.send(m)).await;
+                });
+            }
+        }
     }
 
     /// A text message `t` = `fs` or `file`. `refuse`: why new listings and transfers are
@@ -533,7 +543,7 @@ fn download(
 }
 
 /// `Err(None)`: cancelled or the session ended (nothing to say). The partial file is
-/// deleted on every error. `Ok`: (bytes received, saved path) for the final `got` and
+/// deleted on every error before the last byte (a complete one is kept). `Ok`: (bytes received, saved path) for the final `got` and
 /// `done` the caller sends once the slot is free.
 #[allow(clippy::too_many_arguments)]
 fn upload(
@@ -587,26 +597,22 @@ fn upload(
         }
     };
     drop(f);
-    // the name may have been taken meanwhile: claim a free one (never overwrites), then
-    // move the finished file onto that empty claim
-    let r = r.and_then(|()| {
-        let (claim, path) = create_unique(&dir, name, false).map_err(Some)?;
-        drop(claim);
-        fs::rename(&part, &path).map_err(|e| {
-            let _ = fs::remove_file(&path);
-            Some(io_err(&e))
-        })?;
-        Ok(path)
-    });
-    let path = match r {
-        Ok(p) => p,
-        Err(e) => {
-            if let Err(re) = fs::remove_file(&part) {
-                log::warn!("remote: could not delete a partial upload: {re}");
-            }
-            return Err(e);
+    if let Err(e) = r {
+        if let Err(re) = fs::remove_file(&part) {
+            log::warn!("remote: could not delete a partial upload: {re}");
         }
-    };
+        return Err(e);
+    }
+    // the name may have been taken meanwhile: claim a free one (never overwrites), then
+    // move the finished file onto that empty claim. Complete: a failure here keeps the
+    // `.part` (a scanner holding the claim must not cost the whole transfer).
+    let kept = |e: String| Some(format!("{e} The file was kept as {}.", part.display()));
+    let (claim, path) = create_unique(&dir, name, false).map_err(kept)?;
+    drop(claim);
+    if let Err(e) = fs::rename(&part, &path) {
+        let _ = fs::remove_file(&path);
+        return Err(kept(io_err(&e)));
+    }
     let final_name = file_name(&path);
     if final_name != logged {
         let mut l = lock(log);

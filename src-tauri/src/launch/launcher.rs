@@ -231,7 +231,9 @@ fn record(done: bool, v: &Value) {
         Some(i) => i,
         None => {
             if g.len() >= STATUS_MAX {
-                g.pop_front();
+                // Oldest finished batch first: a still-queued one must stay visible.
+                let j = g.iter().position(|(_, v)| v["done"] == true).unwrap_or(0);
+                g.remove(j);
             }
             g.push_back((
                 id.to_owned(),
@@ -405,11 +407,13 @@ pub async fn launch_one<H: Host>(
     };
     // Commit point: past here cancel is ignored, so a closed previous client is always
     // replaced (cancel never leaves the account with no client). Only a lock still stops it.
-    // A friend Disconnect after start_batch cleared the pause still stops this launch.
+    // A friend Disconnect after start_batch cleared the pause still stops this launch, and so
+    // does another computer taking the account (Run here there, Run on).
     let paused = || {
-        guard(&st.vault)
-            .as_ref()
-            .is_some_and(|v| crate::accounts::friend_paused(v.payload(), id))
+        st.automation.handed_over(id)
+            || guard(&st.vault)
+                .as_ref()
+                .is_some_and(|v| crate::accounts::friend_paused(v.payload(), id))
     };
     if cancel.is_cancelled() || paused() {
         return Err(Fail::Cancelled);
@@ -420,6 +424,12 @@ pub async fn launch_one<H: Host>(
     let install = blocking(h, |st| st.platform.roblox_install()).await?;
     if crate::commands::install_changed(install.as_ref()) {
         h.emit_json("state://changed", serde_json::json!(["roblox"])); // Roblox updated or bootstrapper changed
+    }
+    // Again right before the close: a lock or pause landing now must not leave the account
+    // with its client closed and nothing opened.
+    start.check(&st.lock_gen)?;
+    if paused() {
+        return Err(Fail::Cancelled);
     }
     if flag(&s, "/launch/replacePrevious") {
         let t = tracker.clone();
@@ -456,6 +466,7 @@ pub async fn launch_one<H: Host>(
     })
     .await?;
     let t = tracker.clone();
+    // `None`: process list unreadable, so a running client can't be told from the new one.
     let before = blocking(h, move |st| st.platform.tracked_pids(&t)).await?;
     // Locked meanwhile: nothing more opens with this vault's session.
     start.check(&st.lock_gen)?;
@@ -468,9 +479,39 @@ pub async fn launch_one<H: Host>(
         .map_or(0, |d| d.as_millis() as u64);
     let uri = Zeroizing::new(build_launch_uri(&ticket, ms, &tracker, url.as_deref()));
     drop(ticket);
-    blocking(h, move |st| st.platform.open_uri(&uri))
-        .await?
-        .map_err(|e| format!("Couldn't start Roblox: {e}"))?;
+    // One client at a time (Linux without pasta: `flatpak kill` before the start): every
+    // other account's running client (all, if unknown) closes with this open. RMI's own
+    // close, never a relaunch. One process scan, off the async worker.
+    let me = id.to_owned();
+    let closing = blocking(h, move |st| {
+        if st.platform.capabilities().multi_instance {
+            return vec![];
+        }
+        let accs: Vec<(String, String)> = guard(&st.vault).as_ref().map_or_else(Vec::new, |v| {
+            let p = v.payload();
+            p.accounts
+                .iter()
+                .filter(|a| a.id != me)
+                .map(|a| (a.id.clone(), a.tracker_id.clone()))
+                .collect()
+        });
+        let trackers: Vec<String> = accs.iter().map(|a| a.1.clone()).collect();
+        let running = st.platform.tracked_clients(&trackers);
+        accs.into_iter()
+            .filter(|(_, t)| {
+                running
+                    .as_ref()
+                    .is_none_or(|r| r.iter().any(|(_, x)| x == t))
+            })
+            .map(|a| a.0)
+            .collect()
+    })
+    .await?;
+    st.automation.own_begin(&closing);
+    let opened = blocking(h, move |st| st.platform.open_uri(&uri)).await;
+    st.automation
+        .own_end(&closing, tokio::time::Instant::now() + OWN_GRACE);
+    opened?.map_err(|e| format!("Couldn't start Roblox: {e}"))?;
 
     // Launched: nothing below can fail the account.
     let now = now_iso();
@@ -502,29 +543,32 @@ pub async fn launch_one<H: Host>(
     let (h2, name) = (h.clone(), crate::settings::window_title(&s, &acc.username));
     let (id2, who) = (id.to_owned(), acc.username.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        match h2
-            .st()
-            .platform
-            .setup_window(&tracker, &name, rect, &before, minimize)
-        {
-            Ok(()) => log::info!("window of {who} set up"),
-            Err(e) => log::info!("window of {who} not set up: {e}"),
+        match before.map(|b| {
+            h2.st()
+                .platform
+                .setup_window(&tracker, &name, rect, &b, minimize)
+        }) {
+            Some(Ok(())) => log::info!("window of {who} set up"),
+            Some(Err(e)) => log::info!("window of {who} not set up: {e}"),
+            None => log::info!("window of {who} not set up: running clients unknown"),
         }
         close_if_paused(h2.st(), &id2, &tracker);
     });
     Ok(place.and_then(cached_place).map(|p| p.name))
 }
 
-/// A friend Disconnect between the last pause check and the client's start closed nothing:
-/// close the client now that its window is up (or setup gave up). Blocking.
+/// A friend Disconnect or a hand-over to another computer between the last pause check and
+/// the client's start closed nothing: close the client now that its window is up (or setup
+/// gave up). Blocking.
 fn close_if_paused(st: &AppState, id: &str, tracker: &str) {
-    let paused = guard(&st.vault)
-        .as_ref()
-        .is_some_and(|v| crate::accounts::friend_paused(v.payload(), id));
+    let paused = st.automation.handed_over(id)
+        || guard(&st.vault)
+            .as_ref()
+            .is_some_and(|v| crate::accounts::friend_paused(v.payload(), id));
     if paused {
         match st.platform.close_tracked(tracker) {
-            Ok(n) => log::info!("friend paused during launch: closed {n} client(s) of {id}"),
-            Err(e) => log::warn!("friend paused during launch; close failed: {e}"),
+            Ok(n) => log::info!("paused or moved during launch: closed {n} client(s) of {id}"),
+            Err(e) => log::warn!("paused or moved during launch; close failed: {e}"),
         }
     }
 }
@@ -560,7 +604,13 @@ pub async fn launch_start(
     bar: Bar,
     use_bar_for_all: bool,
 ) -> CmdResult<BatchId> {
-    start_batch(&app, account_ids, bar, use_bar_for_all, true).map(|batch_id| BatchId { batch_id })
+    // Clearing a friend pause saves the vault: off the async worker.
+    tauri::async_runtime::spawn_blocking(move || {
+        start_batch(&app, account_ids, bar, use_bar_for_all, true)
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
+    .map(|batch_id| BatchId { batch_id })
 }
 
 /// Ends a batch on drop, so a panicking batch still does: leaves `BATCHES`, ends the
@@ -623,6 +673,13 @@ pub fn cancel_all() {
 /// An automated launch of a friend-paused account.
 pub const FRIEND_PAUSED: &str = "Your friend disconnected this account. Reconnect it first.";
 
+/// A multi-account batch where only one Roblox client can run.
+pub const ONE_CLIENT: &str = "Only one Roblox client can run on this computer. Pick one account.";
+
+/// An automated launch of an account another computer took (Run here, Run on).
+pub const HANDED_OVER: &str =
+    "This account was moved to another computer. Launch it here to bring it back.";
+
 /// Validate, then run the batch in the background. Returns the batch id. Also used by the
 /// automation API and auto-relaunch. `clear_pause`: a user's launch (UI, friend Reconnect)
 /// ends a friend pause; an automated one (API, relaunch, watcher) is refused instead, so a
@@ -640,6 +697,10 @@ pub fn start_batch<H: Host>(
         return Err("Pick at least one account.".into());
     }
     let st = h.st();
+    let multi = st.platform.capabilities().multi_instance;
+    if !multi && account_ids.len() > 1 {
+        return Err(ONE_CLIENT.into());
+    }
     // Taken before the unlocked check: a lock landing before the batch is in `BATCHES`
     // (its cancel_all misses it) is caught right after the insert below.
     let gen = Gen::now(&st.lock_gen);
@@ -659,6 +720,16 @@ pub fn start_batch<H: Host>(
     if paused && !clear_pause {
         return Err(FRIEND_PAUSED.into());
     }
+    // Locked meanwhile: the batch would only cancel, so nothing below may change state.
+    if !gen.current(&st.lock_gen) {
+        return Err(LOCKED.into());
+    }
+    // Another computer runs it: automation here must not pull it back (accounts flapping).
+    if clear_pause {
+        st.automation.take_back(&account_ids);
+    } else if account_ids.iter().any(|i| st.automation.handed_over(i)) {
+        return Err(HANDED_OVER.into());
+    }
     // Counted before the pause save: a second Reconnect during that save sees it running.
     st.automation.own_begin(&account_ids);
     if paused {
@@ -669,10 +740,13 @@ pub fn start_batch<H: Host>(
             }
             Ok(())
         });
-        match r {
-            Ok(()) => h.emit_json("accounts://changed", Value::Null),
-            Err(e) => log::warn!("could not clear friend pause: {e}"),
+        // Not cleared: launch_one would only report "cancelled", so fail with the reason.
+        if let Err(e) = r {
+            st.automation
+                .own_end(&account_ids, tokio::time::Instant::now());
+            return Err(format!("Could not clear the friend pause: {e}"));
         }
+        h.emit_json("accounts://changed", Value::Null);
     }
     let batch_id = new_id();
     let token = CancellationToken::new();
@@ -732,14 +806,44 @@ pub fn start_batch<H: Host>(
 
 #[tauri::command]
 pub async fn launch_cancel(batch_id: String) -> CmdResult<()> {
+    cancel(&batch_id);
+    Ok(())
+}
+
+fn cancel(batch_id: &str) {
     if let Some(t) = BATCHES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .get(&batch_id)
+        .get(batch_id)
     {
         t.cancel();
     }
-    Ok(())
+}
+
+/// Follows batch `id` (blocking) for up to `wait`, then cancels what has not started and
+/// waits up to `settle` more. The accounts that launched, plus any still past the commit
+/// point then (they launch anyway).
+pub fn wait_launched(id: &str, wait: Duration, settle: Duration) -> Vec<String> {
+    let t0 = std::time::Instant::now();
+    loop {
+        let v = batch_status(id).unwrap_or_default();
+        let done = v["done"] == true;
+        if done || t0.elapsed() >= wait + settle {
+            let up = |s: &Value| s == "launched" || (!done && s == "launching");
+            let Some(accs) = v["accounts"].as_object() else {
+                return Vec::new();
+            };
+            return accs
+                .iter()
+                .filter(|(_, a)| up(&a["state"]))
+                .map(|(k, _)| k.clone())
+                .collect();
+        }
+        if t0.elapsed() >= wait {
+            cancel(id);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[tauri::command]
@@ -764,9 +868,14 @@ pub async fn recents_list(app: AppHandle) -> CmdResult<Vec<Recent>> {
             "/recents/max",
             20,
         );
-        recents::list(&library(st), max as usize)
+        // Unreadable is an error the UI shows, not an empty list (missing file or key is).
+        recents::read_key::<Recent>(&library(st), "recents").map(|mut v| {
+            v.truncate(max as usize);
+            v
+        })
     })
-    .await
+    .await?
+    .map_err(|e| format!("Could not read recents: {e}"))
 }
 
 #[tauri::command]
@@ -930,7 +1039,11 @@ mod tests {
 
     impl Platform for FakePlat {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::default()
+            Capabilities {
+                launch: true,
+                multi_instance: true,
+                ..Default::default()
+            }
         }
         fn roblox_install(&self) -> Option<RobloxInstall> {
             Some(self.install.clone())
@@ -941,6 +1054,12 @@ mod tests {
             );
             self.calls.lock().unwrap().push("open".into());
             Ok(())
+        }
+        /// A player once a URI opened, unless the test said none starts.
+        fn tracked_pids(&self, _: &str) -> Option<Vec<u32>> {
+            let c = self.calls.lock().unwrap();
+            let up = c.iter().any(|s| s == "open") && !c.iter().any(|s| s == "no player");
+            Some(if up { vec![99] } else { vec![] })
         }
         fn close_tracked(&self, t: &str) -> std::io::Result<usize> {
             assert_eq!(t, "123456789012");
@@ -1426,6 +1545,73 @@ mod tests {
             .friend_paused = true;
         close_if_paused(h.st(), "FP3", "123456789012");
         assert!(h.1.lock().unwrap().contains(&"close".to_string()));
+    }
+
+    #[tokio::test]
+    async fn hand_over_after_open_closes_the_new_client() {
+        let d = tempfile::tempdir().unwrap();
+        let h = host(d.path(), "HO2", "good", serde_json::json!({}), false).await;
+        h.0.automation.hand_over(&["HO2".into()]);
+        close_if_paused(h.st(), "HO2", "123456789012");
+        assert!(h.1.lock().unwrap().contains(&"close".to_string()));
+    }
+
+    #[tokio::test]
+    async fn handed_over_account_stops_before_open() {
+        let d = tempfile::tempdir().unwrap();
+        let h = host(d.path(), "HO1", "good", serde_json::json!({}), false).await;
+        // Another computer took it after this launch's batch started.
+        h.0.automation.hand_over(&["HO1".into()]);
+        let r = launch_one(&h, &CancellationToken::new(), "b", "HO1", &bar("5"), false).await;
+        assert_eq!(r, Err(Fail::Cancelled));
+        assert!(!h.1.lock().unwrap().contains(&"open".to_string()));
+    }
+
+    /// Run on: an account sent here counts as started only once its client really started.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sent_accounts_count_only_once_they_launch() {
+        let _g = LIVE_BATCHES.lock().await;
+        let s = serde_json::json!({"launch": {"delayMs": 0}});
+        let d = tempfile::tempdir().unwrap();
+        let sent = |id: &str, cookie: &str, player: bool| {
+            let (dir, id, cookie, s) = (
+                d.path().join(id),
+                id.to_owned(),
+                cookie.to_owned(),
+                s.clone(),
+            );
+            async move {
+                std::fs::create_dir_all(&dir).unwrap();
+                let h = host(&dir, &id, &cookie, s, false).await;
+                if !player {
+                    h.1.lock().unwrap().push("no player".into());
+                }
+                h.0.vault
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .payload_mut()
+                    .accounts[0]
+                    .user_id = Some(7);
+                let h2 = h.clone();
+                let got = tokio::task::spawn_blocking(move || {
+                    crate::remote::handover::launch_saved(&h2, &[7], Duration::from_secs(9))
+                });
+                (got.await.unwrap(), h)
+            }
+        };
+        assert_eq!(sent("R1", "good", true).await.0, Some(vec![7]));
+        // Session check fails here: it would run nowhere if the other computer let it go.
+        assert_eq!(sent("R2", "bad", true).await.0, Some(vec![]));
+        // Windows took the URI but no player started: unknown, so it stays where it runs.
+        let (got, h) = sent("R4", "good", false).await;
+        assert_eq!(got, Some(vec![]));
+        assert!(h.1.lock().unwrap().contains(&"open".to_string()));
+        // No cookie: not even started.
+        let (got, h) = sent("R3", "", true).await;
+        assert_eq!(got, Some(vec![]));
+        assert!(!h.1.lock().unwrap().contains(&"validating".to_string()));
     }
 
     #[tokio::test]

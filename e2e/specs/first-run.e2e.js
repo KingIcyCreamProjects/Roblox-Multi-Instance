@@ -15,6 +15,11 @@ describe("first run", () => {
 
     // Argon2 key derivation can take a few seconds in a debug build.
     await $("nav").waitForExist({ timeout: 60_000 });
+    // a fresh data dir opens the first-run tour; its scrim covers the tabs until closed
+    const close = $('button[aria-label="Close tutorial"]');
+    await close.waitForDisplayed({ timeout: 30_000 });
+    await close.click();
+    await close.waitForExist({ reverse: true, timeout: 15_000 });
     await $("nav").$("button*=Accounts").click();
     await expect($("h1=Your accounts live here")).toBeDisplayed();
     await expect($("button*=Sign in with Roblox")).toBeDisplayed();

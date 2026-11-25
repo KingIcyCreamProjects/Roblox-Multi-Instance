@@ -101,6 +101,7 @@ function SignIn() {
         </label>
         <input
           id={id}
+          data-pii
           value={hint}
           onChange={(e) => setHint(e.target.value)}
           maxLength={20}
@@ -118,6 +119,7 @@ function SignIn() {
             setSavePw(e.target.checked);
             if (!e.target.checked) setPw("");
           }}
+          className="size-4 accent-[var(--accent)]"
         />
         {t("add.signin.savePw")}
       </label>
@@ -247,6 +249,7 @@ function Bulk({
       </label>
       <textarea
         id={id}
+        data-pii
         value={text}
         onChange={(e) => setText(e.target.value)}
         readOnly={busy}

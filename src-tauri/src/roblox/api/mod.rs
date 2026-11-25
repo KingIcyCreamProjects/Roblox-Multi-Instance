@@ -75,6 +75,8 @@ mod tests {
                                 ".ROBLOSECURITY=NEWCOOKIE; domain=.roblox.com; HttpOnly",
                             ),
                         ],
+                        // a body that is not JSON must not lose the issued cookie
+                        "<html>",
                     )
                         .into_response()
                 }),

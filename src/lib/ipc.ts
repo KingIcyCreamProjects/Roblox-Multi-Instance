@@ -173,6 +173,15 @@ export type RemotePeer = {
 };
 /** An account a paired computer runs right now (by Roblox user id). */
 export type Elsewhere = { userId: number; device: string; ip: string };
+/** A paired computer that can take accounts (Run on). */
+export type RemoteTarget = { ip: string; device: string };
+/** What a send did: launching on the target, and of those still running where they were. */
+export type RemoteSent = {
+  started: number[];
+  still: number[];
+  /** A computer with an older RMI runs some of the asked accounts: those were not sent. */
+  old?: string;
+};
 export type RemotePeers = { installed: boolean; running: boolean; peers: RemotePeer[] };
 /** `token` is secret: the viewer sends it as the socket's first message. */
 export type RemoteConnect = { url: string; token: string; name: string };
@@ -598,6 +607,12 @@ type Commands = {
   /** Asks the paired computers to close these accounts' clients; resolves with the user ids
    * now free to launch here. Can take up to 40 s. Rejects with a sentence when none were. */
   remote_run_here: [{ userIds: number[] }, number[]];
+  remote_targets: [Record<string, never>, RemoteTarget[]];
+  /** Sends the accounts to the paired computer at `ip`; resolves with the user ids now
+   * launching there (and those still running where they were). Can take about 85 s: 40 s for
+   * the answer there, the close here, then up to 40 s more for a third computer running them.
+   * Rejects with a sentence when none were. */
+  remote_send: [{ userIds: number[]; ip: string }, RemoteSent];
   /** Secret: the friend password. */
   friend_password: [Record<string, never>, string];
   friend_password_copy: [Record<string, never>, void];
@@ -696,6 +711,10 @@ const CODE_TEXT: Record<string, MsgKey> = {
   SESSION_EXPIRED: "tools.sessionExpired",
   PIN_REQUIRED: "tools.pin.batch",
   HOMELAB_NO_BUILD: "hl.noBuild",
+  SETTINGS_PARTIAL: "settings.err.partial",
+  AUTOSTART_FAILED: "settings.err.autostart",
+  BULK_TOO_LARGE: "add.tooMany",
+  IMPORT_TOO_MANY: "imp.tooMany",
 };
 const CODE = /^(\w+: )?([A-Z][A-Z0-9_]+)$/;
 const raw = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -767,7 +786,10 @@ export function onEvent<T>(
     .then(({ listen }) =>
       listen<T>(name, (e) => cb(e.payload)).then((f) => (dead ? f() : (off = f))),
     )
-    .catch((e) => console.error(`listen ${name} failed: ${String(e)}`));
+    // to the log file (report.ts imports this module, so loaded on demand)
+    .catch((e) =>
+      import("./report").then((r) => r.logError(`listen ${name} failed: ${String(e)}`)),
+    );
   return Object.assign(
     () => {
       dead = true;

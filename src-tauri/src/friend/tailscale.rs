@@ -165,7 +165,8 @@ pub fn rmi_made(public_url: &str) -> bool {
 }
 
 /// The old friend port whose Funnel entry must go after a settings save: the remote was on an
-/// RMI-made address and then was turned off, moved to another port, or lost its address.
+/// RMI-made address and then was turned off, moved to another port, or lost its address (cleared
+/// or replaced by one RMI did not make).
 pub fn stale_port(old: &Value, new: &Value) -> Option<u16> {
     let f = |v: &Value, k: &str| v.pointer(&format!("/friend/{k}")).cloned();
     let url = |v: &Value| f(v, "publicUrl").and_then(|u| u.as_str().map(str::to_owned));
@@ -174,19 +175,21 @@ pub fn stale_port(old: &Value, new: &Value) -> Option<u16> {
     let off = f(old, "enabled") == Some(Value::Bool(true))
         && f(new, "enabled") != Some(Value::Bool(true));
     let moved = f(new, "port") != Some(port.into());
-    let cleared = url(new).is_none_or(|u| u.trim().is_empty());
-    (off || moved || cleared).then_some(port)
+    let replaced = url(new).is_none_or(|u| !rmi_made(&u));
+    (off || moved || replaced).then_some(port)
 }
 
-/// The new friend port that needs RMI's Funnel entry again: the remote stays on with the same
-/// RMI-made address, but a save moved it to another port (`stale_port` removed the old entry).
+/// The friend port that needs RMI's Funnel entry again: the remote is on with the same
+/// RMI-made address, and a save moved it to another port (`stale_port` removed the old entry)
+/// or turned it back on (turning it off removed the entry).
 pub fn moved_port(old: &Value, new: &Value) -> Option<u16> {
     let f = |v: &Value, k: &str| v.pointer(&format!("/friend/{k}")).cloned();
     let url = f(new, "publicUrl")?;
     let same_url = rmi_made(url.as_str()?) && f(old, "publicUrl") == Some(url);
-    let on = f(new, "enabled") == Some(Value::Bool(true));
+    let on = |v: &Value| f(v, "enabled") == Some(Value::Bool(true));
     let port = u16::try_from(f(new, "port")?.as_u64()?).ok()?;
-    (same_url && on && f(old, "port") != Some(port.into())).then_some(port)
+    let changed = f(old, "port") != Some(port.into()) || !on(old);
+    (same_url && on(new) && changed).then_some(port)
 }
 
 /// The friend port whose Funnel entry must go because the server is not running on it (bind
@@ -445,16 +448,50 @@ pub async fn friend_ts_status(app: tauri::AppHandle) -> Result<TsStatus, String>
         .map_err(|e| e.to_string())
 }
 
-/// Funnel on for the friend server; saves `friend.publicUrl` + `friend.enabled` the way the
-/// settings UI does (which also starts the friend server). Returns the public URL.
+/// Funnel on for the friend server; saves `friend.enabled` then `friend.publicUrl` the way the
+/// settings UI does. Returns the public URL. The friend server binds first: Funnel only for a
+/// port it holds (else another program listening there would be public).
+/// ponytail: the `--bg` entry outlives RMI (quit does not remove it); nothing else may take the
+/// port while RMI is closed and the address is shared.
 #[tauri::command]
 pub async fn friend_ts_enable(app: tauri::AppHandle) -> Result<String, TsError> {
-    let t = target_url(saved_port(&app));
-    let url = blocking(move || enable_blocking(&t)).await?;
-    let patch = json!({ "friend": { "publicUrl": url, "enabled": true } });
-    crate::commands::settings_set(app.clone(), app.state::<AppState>(), patch)
-        .await
-        .map_err(|m| err("failed", m))?;
+    let port = saved_port(&app);
+    let save =
+        |patch: Value| crate::commands::settings_set(app.clone(), app.state::<AppState>(), patch);
+    let was_on = app.state::<AppState>().friend.enabled();
+    let saved = save(json!({ "friend": { "enabled": true } })).await;
+    let s = app.state::<AppState>().friend.status().await;
+    let url = if s.running && s.port == port {
+        blocking(move || enable_port(port)).await
+    } else {
+        // settings_set errors are codes now (SETTINGS_PARTIAL): log, show fixed words.
+        if let Err(m) = saved {
+            log::warn!("friend remote not started: {m}");
+        }
+        Err(err("failed", "The friend server did not start."))
+    };
+    let url = match url {
+        Ok(u) => u,
+        Err(e) => {
+            if !was_on {
+                if let Err(m) = save(json!({ "friend": { "enabled": false } })).await {
+                    log::warn!("friend remote not switched back off: {m}");
+                }
+            }
+            return Err(e);
+        }
+    };
+    match save(json!({ "friend": { "publicUrl": url } })).await {
+        Ok(_) => {}
+        // Saved; only an unrelated restart (automation, remote) failed.
+        Err(m) if m == crate::commands::SETTINGS_PARTIAL => {
+            log::warn!("friend link saved; another server did not restart")
+        }
+        Err(m) => {
+            log::warn!("friend link not saved: {m}");
+            return Err(err("failed", "Could not save the friend link."));
+        }
+    }
     Ok(url)
 }
 
@@ -590,6 +627,11 @@ mod tests {
         assert_eq!(stale_port(&s(true, 7812, own), &s(false, 7812, own)), None);
         let odd = "https://rmi.example.ts.net:4443";
         assert_eq!(stale_port(&s(true, 7812, odd), &s(false, 7812, odd)), None);
+        // RMI-made address replaced by one of the owner's: ours goes
+        assert_eq!(
+            stale_port(&s(true, 7812, ts), &s(true, 7812, own)),
+            Some(7812)
+        );
         assert_eq!(stale_port(&json!({}), &s(false, 7812, "")), None);
     }
 
@@ -605,6 +647,11 @@ mod tests {
         assert_eq!(
             moved_port(&s(false, 7812, ts), &s(true, 7900, ts)),
             Some(7900)
+        );
+        // off then on again, same port: turning off removed the entry
+        assert_eq!(
+            moved_port(&s(false, 7812, ts), &s(true, 7812, ts)),
+            Some(7812)
         );
         // same port, off, address cleared or changed, not RMI-made: nothing to make
         assert_eq!(moved_port(&s(true, 7812, ts), &s(true, 7812, ts)), None);

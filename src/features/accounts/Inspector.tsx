@@ -1,6 +1,7 @@
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
-import { ChevronRight, Globe, Link2, Play, Save, Trash2, Wrench } from "lucide-react";
+import { ChevronDown, ChevronRight, Globe, Link2, Play, Save, Trash2, Wrench } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { memo, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useSettings } from "@/app/useSettings";
@@ -10,7 +11,7 @@ import { ServerPick } from "@/features/playbar/ServerPick";
 import { Chip } from "@/features/playbar/DestChip";
 import { targetFromBar, usePlayBar } from "@/features/playbar/store";
 import { usePlay } from "@/features/playbar/usePlay";
-import { runHere, useElsewhere, useMoving } from "@/features/devices/elsewhere";
+import { runHere, sendTo, useElsewhere, useMoving, useTargets } from "@/features/devices/elsewhere";
 import { toast } from "@/components/Toasts";
 import {
   call,
@@ -22,8 +23,8 @@ import {
   type LaunchTarget,
 } from "@/lib/ipc";
 import { t, type MsgKey } from "@/lib/i18n";
-import { Avatar, presenceKey } from "./AccountRow";
-import { TAGS } from "./AccountMenu";
+import { Avatar, presenceDot, presenceKey } from "./AccountRow";
+import { TAGS, content as menuContent, item as menuItem } from "./AccountMenu";
 import { DestLabel, useDestName } from "./DestLabel";
 import { ago, destText, label } from "./model";
 import { openSite } from "./openSite";
@@ -112,9 +113,11 @@ function DestEditor({
   const [mode, setMode] = useState<LaunchMode>(saved?.mode ?? (saved?.jobId ? "specific" : "any"));
   const [job, setJob] = useState(saved?.jobId ?? "");
   // saved value changed (our Save, Clear, or elsewhere): resync in place, no remount (keeps focus)
-  const [prev, setPrev] = useState(initial);
-  if (initial !== prev) {
-    setPrev(initial);
+  // keyed on the whole saved target: a new mode or JobId on the same place resyncs too
+  const savedKey = `${initial}\0${JSON.stringify(saved ?? null)}`;
+  const [prev, setPrev] = useState(savedKey);
+  if (savedKey !== prev) {
+    setPrev(savedKey);
     setText(initial);
     setMode(saved?.mode ?? (saved?.jobId ? "specific" : "any"));
     setJob(saved?.jobId ?? "");
@@ -200,13 +203,16 @@ function DestEditor({
         </Button>
         {onClear && (
           <Button
-            onClick={() => {
-              setText("");
-              setMode("any");
-              setJob("");
-              setBad(null);
-              void onClear();
-            }}
+            onClick={() =>
+              // a failed write keeps the field on what is still saved
+              void onClear().then((ok) => {
+                if (!ok) return;
+                setText("");
+                setMode("any");
+                setJob("");
+                setBad(null);
+              })
+            }
           >
             {t("dest.clear")}
           </Button>
@@ -258,24 +264,21 @@ function GroupPanel({ name, list }: { name: string; list: AccountsList }) {
   return (
     <div className="flex flex-col gap-4 p-[1.375rem]">
       <div>
-        <h2 data-pii className="truncate text-[1.125rem] leading-tight font-semibold text-text-1">
+        <h2 data-pii className="truncate text-20 leading-tight font-semibold text-text-1">
           {name}
         </h2>
         <p className="mt-0.5 text-12 text-text-3">{t("group.label")}</p>
       </div>
       <ul className="flex max-h-44 flex-col gap-0.5 overflow-y-auto">
         {members.map((a) => (
-          <li
-            key={a.id}
-            className="flex h-[1.625rem] items-center gap-2.5 text-[0.78125rem] text-text-2"
-          >
+          <li key={a.id} className="flex h-[1.625rem] items-center gap-2.5 text-13 text-text-2">
             <span className="relative shrink-0">
               <Avatar a={a} size={20} round />
               <span
                 aria-hidden
                 className={clsx(
                   "absolute -right-px -bottom-px size-1.5 rounded-full shadow-[0_0_0_1.5px_var(--glass)]",
-                  stateDot[a.presence?.state ?? "offline"],
+                  presenceDot[a.presence?.state ?? "offline"],
                 )}
               />
             </span>
@@ -288,7 +291,7 @@ function GroupPanel({ name, list }: { name: string; list: AccountsList }) {
       {divider}
       <DestEditor
         key={name}
-        initial=""
+        initial={targetText(saved)}
         hint={t("dest.hintGroup", { n: ids.length })}
         saved={saved}
         onSave={apply}
@@ -297,13 +300,6 @@ function GroupPanel({ name, list }: { name: string; list: AccountsList }) {
     </div>
   );
 }
-
-const stateDot = {
-  online: "bg-online",
-  in_game: "bg-online",
-  in_studio: "bg-studio",
-  offline: "bg-text-3",
-};
 
 /** Average colour of an image for the bloom; null when unreadable (tainted canvas, no image). */
 export function useBloom(src: string | null) {
@@ -499,6 +495,7 @@ function GroupPicker({
         <input
           id={id}
           autoFocus
+          data-pii
           maxLength={50}
           value={name}
           placeholder={t("inspector.newGroupName")}
@@ -516,6 +513,7 @@ function GroupPicker({
       ) : (
         <select
           id={id}
+          data-pii
           value={value ?? ""}
           onChange={(e) => (e.target.value === "\0new" ? startAdding() : onPick(e.target.value))}
           className={clsx(inputCls, "h-8")}
@@ -648,7 +646,7 @@ function ExtraField({
       value={text}
       max={5000}
       multiline
-      placeholder="key=value"
+      placeholder={t("inspector.extraPlaceholder")}
       onCommit={(s) =>
         onCommit(
           Object.fromEntries(
@@ -678,6 +676,46 @@ function sessionText(a: AccountView) {
     default:
       return t("session.unknown");
   }
+}
+
+/** "Run on" button: the paired computers at least one of these accounts is not running on yet. */
+function RunOn({ accounts }: { accounts: AccountView[] }) {
+  const where = useElsewhere();
+  const places = useTargets().filter((p) =>
+    accounts.some((a) => a.userId !== null && where.get(a.userId)?.ip !== p.ip),
+  );
+  const moving = useMoving((m) => accounts.some((a) => m.ids.includes(a.id)));
+  // a Run here button sits beside it and already says "Moving…": one indicator, not two
+  const besideRunHere = accounts.some((a) => a.userId !== null && where.has(a.userId));
+  if (!places.length) return null;
+  return (
+    <DropdownMenu.Root modal={false}>
+      <DropdownMenu.Trigger asChild disabled={moving}>
+        <Button>
+          {t(moving && !besideRunHere ? "elsewhere.moving" : "elsewhere.runOn")}
+          <ChevronDown size={14} strokeWidth={1.75} aria-hidden />
+        </Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          className={menuContent}
+          align="start"
+          sideOffset={4}
+          collisionPadding={8}
+        >
+          {places.map((p) => (
+            <DropdownMenu.Item
+              key={p.ip}
+              className={menuItem}
+              onSelect={() => void sendTo(accounts, p)}
+            >
+              <span className="flex-1 truncate">{p.device}</span>
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
 }
 
 function Single({
@@ -721,13 +759,13 @@ function Single({
   return (
     <div className="flex flex-col gap-4 p-[1.375rem]">
       <div>
-        <h2 data-pii className="truncate text-[1.125rem] leading-tight font-semibold text-text-1">
+        <h2 data-pii className="truncate text-20 leading-tight font-semibold text-text-1">
           {label(a)}
         </h2>
         <p className="mt-0.5 flex items-center gap-1.5 text-12 text-text-3">
           <span
             aria-hidden
-            className={clsx("size-[0.4375rem] shrink-0 rounded-full", stateDot[state])}
+            className={clsx("size-[0.4375rem] shrink-0 rounded-full", presenceDot[state])}
           />
           <span className="truncate">
             {t(presenceKey[state])}
@@ -798,13 +836,14 @@ function Single({
                 {t(moving ? "elsewhere.moving" : "elsewhere.runHere")}
               </Button>
             )}
+            <RunOn accounts={[a]} />
             <Button onClick={() => openSite(a.id)}>
               <Globe size={14} strokeWidth={1.75} />
               {t("inspector.openSite")}
             </Button>
             <Button onClick={() => useUi.setState({ toolsOpen: true })}>
               <Wrench size={14} strokeWidth={1.75} />
-              {t("inspector.tools")}
+              {t("menu.tools")}
             </Button>
           </div>
           <p data-pii className="truncate text-12 text-text-3">
@@ -901,7 +940,8 @@ function Multi({
   const sameColor = picked.every((a) => a.color === picked[0].color) ? picked[0].color : undefined;
   const where = useElsewhere();
   const away = picked.filter((a) => a.userId !== null && where.has(a.userId));
-  const moving = useMoving((m) => away.some((a) => m.ids.includes(a.id)));
+  // every picked account, the same scope as Run on: a send of any of them disables both
+  const moving = useMoving((m) => picked.some((a) => m.ids.includes(a.id)));
   return (
     <div className="flex flex-col gap-5 p-[1.375rem]">
       <div className="flex items-center pl-3">
@@ -920,22 +960,25 @@ function Multi({
           </span>
         )}
       </div>
-      <h2 className="text-[1.125rem] leading-tight font-semibold text-text-1 tnum">
+      <h2 className="text-20 leading-tight font-semibold text-text-1 tnum">
         {t("inspector.selected", { n: picked.length })}
       </h2>
       <div className="flex flex-wrap gap-2">
         <Button variant="primary" onClick={() => play(ids)}>
           <Play size={14} strokeWidth={2.25} fill="currentColor" />
-          {home ? t("playbar.homeN", { n: picked.length }) : t("inspector.playAll")}
+          {home
+            ? t("playbar.homeN", { n: picked.length })
+            : t("playbar.playN", { n: picked.length })}
         </Button>
         {away.length > 0 && (
           <Button disabled={moving} onClick={() => void runHere(away)}>
             {moving ? t("elsewhere.moving") : t("elsewhere.runNHere", { n: away.length })}
           </Button>
         )}
+        <RunOn accounts={picked} />
         <Button onClick={() => useUi.setState({ toolsOpen: true })}>
           <Wrench size={14} strokeWidth={1.75} />
-          {t("inspector.tools")}
+          {t("menu.tools")}
         </Button>
         <Button variant="danger" onClick={() => void act.remove(ids)}>
           <Trash2 size={14} strokeWidth={1.75} />

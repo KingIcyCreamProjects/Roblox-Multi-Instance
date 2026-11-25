@@ -254,6 +254,12 @@ struct FakeLocal {
     running: Mutex<Option<Vec<u64>>>,
     locked: AtomicBool,
     released: Mutex<Vec<Vec<u64>>>,
+    launched: Mutex<Vec<Vec<u64>>>,
+    /// Ids a release leaves running (a close that failed).
+    keep: Mutex<Vec<u64>>,
+    cannot_launch: AtomicBool,
+    /// Every hold (ids, on), in order.
+    held: Mutex<Vec<(Vec<u64>, bool)>>,
 }
 
 impl handover::Local for FakeLocal {
@@ -262,7 +268,25 @@ impl handover::Local for FakeLocal {
     }
     fn release(&self, ids: &[u64]) -> Option<Vec<u64>> {
         lock(&self.released).push(ids.to_vec());
+        let keep = lock(&self.keep).clone();
+        let gone = ids.iter().filter(|i| !keep.contains(i)).copied().collect();
+        (!self.locked.load(SeqCst)).then_some(gone)
+    }
+    fn launch(&self, ids: &[u64]) -> Option<Vec<u64>> {
+        lock(&self.launched).push(ids.to_vec());
         (!self.locked.load(SeqCst)).then(|| ids.to_vec())
+    }
+    fn can_launch(&self) -> bool {
+        !self.cannot_launch.load(SeqCst)
+    }
+    fn hold(&self, ids: &[u64]) -> Vec<handover::Held> {
+        lock(&self.held).push((ids.to_vec(), true));
+        ids.iter()
+            .map(|i| (*i, String::new(), String::new()))
+            .collect()
+    }
+    fn unhold(&self, held: &[handover::Held]) {
+        lock(&self.held).push((held.iter().map(|h| h.0).collect(), false));
     }
 }
 
@@ -296,7 +320,10 @@ async fn running_answer_carries_the_hosts_own_accounts() {
     let body = json!({"name": "Mac", "userIds": [7]});
     let (st, v) = post_json(&addr, "running", &token, body).await;
     assert_eq!(st, 200);
-    assert_eq!(v, json!({"name": "Test PC", "userIds": [5, 6]}));
+    assert_eq!(
+        v,
+        json!({"name": "Test PC", "userIds": [5, 6], "canLaunch": true})
+    );
 }
 
 #[tokio::test]
@@ -306,7 +333,36 @@ async fn running_answer_is_empty_while_locked() {
     let (addr, _stop) = serve_local(&r).await;
     let token = paired_token(&r, &addr).await;
     let (_, v) = post_json(&addr, "running", &token, json!({"name": "", "userIds": []})).await;
-    assert_eq!(v["userIds"], json!([]));
+    // unknown, not "nothing runs here": left out
+    assert_eq!(v.get("userIds"), None);
+    // Locked: no target for sent accounts either.
+    assert_eq!(v["canLaunch"], json!(false));
+}
+
+#[tokio::test]
+async fn running_answer_says_whether_this_computer_can_launch() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![]));
+    l.cannot_launch.store(true, SeqCst); // Linux without Sober, no Roblox installed
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let (_, v) = post_json(&addr, "running", &token, json!({"name": "", "userIds": []})).await;
+    assert_eq!(v["canLaunch"], json!(false));
+}
+
+/// No Roblox (or Sober) here: not a target, and a launch asked anyway starts nothing.
+#[test]
+fn report_and_launch_follow_this_computers_launch_support() {
+    let d = tempfile::tempdir().unwrap();
+    // `Null` platform: launching is not supported.
+    let h = crate::automation::backend::tests::host_with(d.path(), Box::new(crate::platform::Null));
+    let body = viewer::report_body(&h.0).unwrap();
+    assert_eq!(body["canLaunch"], json!(false));
+    assert_eq!(
+        handover::launch_saved(&h, &[1], Duration::ZERO),
+        Some(vec![])
+    );
+    assert!(!h.0.automation.own_running("A"), "no batch started");
 }
 
 #[tokio::test]
@@ -361,9 +417,7 @@ async fn queued_handover_rides_the_next_report_and_completes() {
     let report = |ids: Vec<u64>| json!({"name": "Mac", "userIds": ids, "canHandOver": true});
     post_json(&addr, "running", &token, report(vec![9, 4])).await;
     let task = queue(&r, vec![9]);
-    while lock(&r.c.wants).is_empty() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    until("the ask queued", || !lock(&r.c.wants).is_empty()).await;
     // The viewer's next report still runs 9; its answer asks for it.
     let (_, v) = post_json(&addr, "running", &token, report(vec![9, 4])).await;
     assert_eq!(v["handover"], json!([9]));
@@ -377,6 +431,60 @@ async fn queued_handover_rides_the_next_report_and_completes() {
     assert!(lock(&r.c.wants).is_empty());
 }
 
+#[tokio::test]
+async fn queued_handover_is_not_asked_too_late_to_be_seen() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = json!({"name": "Mac", "userIds": [9], "canHandOver": true});
+    post_json(&addr, "running", &token, report.clone()).await;
+    let task = queue(&r, vec![9]);
+    until("the ask queued", || !lock(&r.c.wants).is_empty()).await;
+    // Half the wait gone: it could close there after the wait here gave up (then the account
+    // runs nowhere).
+    for v in lock(&r.c.wants).values_mut() {
+        v.0 -= HANDOVER_WAIT / 2;
+    }
+    let (_, v) = post_json(&addr, "running", &token, report).await;
+    assert_eq!(v.get("handover"), None);
+    task.abort();
+}
+
+/// Waits (up to 1 s) for `ok`.
+async fn soon(ok: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn queued_handovers_to_one_computer_add_up() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    peer_report(&r, "Mac", vec![9, 4], true);
+    let wanted = || lock(&r.c.wants).get("viewer").map(|w| w.1.clone());
+    let first = queue(&r, vec![9]);
+    soon(|| wanted().is_some()).await;
+    // A second ask to the same computer joins the first instead of replacing it.
+    let second = queue(&r, vec![4]);
+    soon(|| wanted().is_some_and(|w| w.len() == 2)).await;
+    assert_eq!(wanted(), Some(vec![9, 4]));
+    // One report carries both asks; the first ends on the next one.
+    deliver(&r, vec![9, 4]);
+    peer_report(&r, "Mac", vec![4], true);
+    r.c.tick.notify_waiters();
+    assert_eq!(first.await.unwrap(), Ok(vec![9]));
+    peer_report(&r, "Mac", vec![], true);
+    r.c.tick.notify_waiters();
+    assert_eq!(second.await.unwrap(), Ok(vec![4]));
+    assert!(lock(&r.c.wants).is_empty());
+}
+
 /// A report from the viewer at 127.0.0.1, straight into `peers`.
 fn peer_report(r: &Remote, name: &str, ids: Vec<u64>, can_hand_over: bool) {
     lock(&r.c.peers).insert(
@@ -387,8 +495,64 @@ fn peer_report(r: &Remote, name: &str, ids: Vec<u64>, can_hand_over: bool) {
             ids,
             ip: "127.0.0.1".into(),
             handover: can_hand_over,
+            launch: can_hand_over,
         },
     );
+}
+
+/// The viewer's next report as the `running` route takes it: it carries the queued asks.
+fn deliver(r: &Remote, ids: Vec<u64>) {
+    let mut w = lock(&r.c.wants);
+    w.remove("viewer");
+    peer_report(r, "Mac", ids, true);
+    let at = lock(&r.c.peers)["viewer"].at;
+    lock(&r.c.carried).insert("viewer".into(), at);
+    drop(w);
+    r.c.tick.notify_waiters();
+}
+
+/// The report that carries the ask already misses an account that stopped on its own: the
+/// others are still asked, and only the report after it settles the hand-over.
+#[tokio::test]
+async fn queued_handover_waits_for_the_report_after_its_ask() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = |ids: Vec<u64>| json!({"name": "Mac", "userIds": ids, "canHandOver": true});
+    post_json(&addr, "running", &token, report(vec![9, 4])).await;
+    let task = queue(&r, vec![9, 4]);
+    until("the ask queued", || !lock(&r.c.wants).is_empty()).await;
+    // 4 stopped there meanwhile; this report carries the ask for both.
+    let (_, v) = post_json(&addr, "running", &token, report(vec![9])).await;
+    assert_eq!(v["handover"], json!([9, 4]));
+    // one more report that still lists both: the waiter has been woken (and polled) by now
+    post_json(&addr, "running", &token, report(vec![9, 4])).await;
+    assert!(
+        !task.is_finished(),
+        "not settled by the report that carried the ask"
+    );
+    post_json(&addr, "running", &token, report(vec![])).await;
+    assert_eq!(task.await.unwrap(), Ok(vec![9, 4]));
+}
+
+/// Locked here: nothing is asked of the other computer (the ask waits, the lock wins).
+#[tokio::test]
+async fn no_ask_goes_out_while_locked() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    with_local(&r, None);
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = json!({"name": "Mac", "userIds": [9], "canHandOver": true});
+    post_json(&addr, "running", &token, report.clone()).await;
+    let task = queue(&r, vec![9]);
+    until("the ask queued", || !lock(&r.c.wants).is_empty()).await;
+    let (_, v) = post_json(&addr, "running", &token, report).await;
+    assert_eq!(v.get("handover"), None);
+    assert!(!lock(&r.c.wants).is_empty(), "still waiting, not dropped");
+    task.abort();
 }
 
 #[tokio::test(start_paused = true)]
@@ -416,7 +580,7 @@ async fn queued_handover_needs_a_new_rmi_there() {
 async fn run_here_keeps_what_one_computer_released() {
     let (_d, r, _f) = setup(true);
     peer_report(&r, "Mac", vec![9], true); // never answers
-    r.note_host("100.64.0.2", "Office PC", vec![1, 2]);
+    r.note_host("100.64.0.2", "Office PC", vec![1, 2], true);
     let asked = Mutex::new(vec![]);
     let direct = |ip: String, name: String, ids: Vec<u64>| {
         lock(&asked).push((ip, name, ids));
@@ -443,11 +607,41 @@ async fn run_here_keeps_what_one_computer_released() {
     );
 }
 
+#[tokio::test]
+async fn run_here_asks_every_computer_running_it() {
+    let (_d, r, _f) = setup(true);
+    let both = || {
+        r.note_host("100.64.0.2", "Office PC", vec![9], true);
+        r.note_host("100.64.0.3", "Laptop", vec![9], true);
+    };
+    both();
+    let (asked, all) = answering(Ok(vec![9]));
+    assert_eq!(r.run_here(&[9], &all).await, Ok(vec![9]));
+    let mut ips: Vec<String> = lock(&asked).iter().map(|a| a.0.clone()).collect();
+    ips.sort();
+    assert_eq!(ips, ["100.64.0.2", "100.64.0.3"]);
+    // One lets go, one cannot: not free here, and still listed where it runs.
+    both();
+    let one = |ip: String, name: String, ids: Vec<u64>| async move {
+        if ip == "100.64.0.2" {
+            Ok(ids)
+        } else {
+            Err(format!("RMI is locked on {name}."))
+        }
+    };
+    assert_eq!(
+        r.run_here(&[9], one).await,
+        Err("RMI is locked on Laptop.".into())
+    );
+    let left: Vec<String> = r.elsewhere().into_iter().map(|e| e.ip).collect();
+    assert_eq!(left, ["100.64.0.3"]);
+}
+
 #[test]
 fn elsewhere_lists_both_directions_and_drops_old_reports() {
     let (_d, r, _f) = setup(true);
     peer_report(&r, "Mac", vec![9], true);
-    r.note_host("100.64.0.2", "Office PC", vec![1, 9]);
+    r.note_host("100.64.0.2", "Office PC", vec![1, 9], true);
     let mut got = r.elsewhere();
     got.sort_by_key(|e| e.user_id);
     let row = |user_id, device: &str, ip: &str| handover::Elsewhere {
@@ -482,42 +676,461 @@ fn elsewhere_lists_both_directions_and_drops_old_reports() {
     assert!(r.elsewhere().is_empty());
 }
 
-/// The releasing computer: the client closes and auto-relaunch leaves it closed.
+#[tokio::test]
+async fn launch_route_starts_only_for_a_paired_computer() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let body = json!({"userIds": [7]});
+    let (st, _) = post_json(&addr, "launch", &new_token(), body.clone()).await;
+    assert_eq!(st, 403);
+    let many: Vec<u64> = (0..=MAX_RUNNING as u64).collect();
+    let (st, _) = post_json(&addr, "launch", &token, json!({ "userIds": many })).await;
+    assert_eq!(st, 400);
+    assert!(lock(&l.launched).is_empty());
+    let (st, v) = post_json(&addr, "launch", &token, body).await;
+    assert_eq!((st, v), (200, json!({"started": [7]})));
+    assert_eq!(*lock(&l.launched), [vec![7]]);
+}
+
+#[tokio::test]
+async fn launch_route_drops_started_accounts_from_the_callers_report() {
+    let (_d, r, _f) = setup(true);
+    with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = json!({"name": "Mac", "userIds": [7, 8], "canHandOver": true});
+    post_json(&addr, "running", &token, report).await;
+    post_json(&addr, "launch", &token, json!({"userIds": [7]})).await;
+    // It runs here now: the Mac's last report must not offer Run here for it until the next.
+    let left: Vec<u64> = r.elsewhere().iter().map(|e| e.user_id).collect();
+    assert_eq!(left, [8]);
+}
+
+#[tokio::test]
+async fn launch_route_says_locked() {
+    let (_d, r, _f) = setup(true);
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let (st, _) = post_json(&addr, "launch", &token, json!({"userIds": [7]})).await;
+    assert_eq!(st, 503);
+    let l = with_local(&r, None);
+    l.locked.store(true, SeqCst);
+    let (st, v) = post_json(&addr, "launch", &token, json!({"userIds": [7]})).await;
+    assert_eq!((st, &v["error"]["code"]), (409, &json!("locked")), "{v}");
+}
+
+type Asked = Arc<Mutex<Vec<(String, String, Vec<u64>)>>>;
+type Ids = Result<Vec<u64>, String>;
+
+fn sent(started: Vec<u64>, still: Vec<u64>) -> Result<handover::Sent, String> {
+    Ok(handover::Sent {
+        started,
+        still,
+        old: None,
+    })
+}
+
+/// A direct ask that records its calls and answers `ok`.
+fn answering(
+    ok: Ids,
+) -> (
+    Asked,
+    impl Fn(String, String, Vec<u64>) -> std::future::Ready<Ids>,
+) {
+    let asked = Asked::default();
+    let a = asked.clone();
+    let f = move |ip, name, ids| {
+        lock(&a).push((ip, name, ids));
+        std::future::ready(ok.clone())
+    };
+    (asked, f)
+}
+
+#[tokio::test]
+async fn queued_send_rides_the_next_report_and_waits_for_the_ack() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    let l = with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = |launched: Option<(Vec<u64>, &Value)>| {
+        let mut v = json!({"name": "Mac", "userIds": [], "canHandOver": true, "canLaunch": true});
+        if let Some((ids, op)) = launched {
+            v["launched"] = json!(ids);
+            v["launchedOp"] = op.clone();
+        }
+        v
+    };
+    let (_, v) = post_json(&addr, "running", &token, report(None)).await;
+    assert_eq!(v["canLaunch"], json!(true));
+    let r2 = r.clone();
+    let task = tokio::spawn(async move {
+        let (_, no) = answering(Err("not a host".into()));
+        r2.send(&[9], "127.0.0.1", &no, &no).await
+    });
+    until("the send queued", || !lock(&r.c.launches).is_empty()).await;
+    // Its next report's answer asks, once.
+    let (_, asked) = post_json(&addr, "running", &token, report(None)).await;
+    assert_eq!(asked["launch"], json!([9]));
+    let (_, v) = post_json(&addr, "running", &token, report(None)).await;
+    assert_eq!(v.get("launch"), None);
+    assert!(!task.is_finished());
+    assert!(
+        lock(&l.released).is_empty(),
+        "nothing closes before the ack"
+    );
+    let ack = report(Some((vec![9], &asked["launchOp"])));
+    post_json(&addr, "running", &token, ack).await;
+    assert_eq!(task.await.unwrap(), sent(vec![9], vec![]));
+    assert_eq!(*lock(&l.released), [vec![9]]);
+    assert!(lock(&r.c.launches).is_empty() && lock(&r.c.acks).is_empty());
+}
+
+#[tokio::test]
+async fn queued_send_settles_only_on_its_own_ack() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    let l = with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = json!({"name": "Mac", "userIds": [], "canLaunch": true});
+    post_json(&addr, "running", &token, report.clone()).await;
+    let r2 = r.clone();
+    let task = tokio::spawn(async move {
+        let (_, no) = answering(Err("not a host".into()));
+        r2.send(&[1], "127.0.0.1", &no, &no).await
+    });
+    until("the send queued", || !lock(&r.c.launches).is_empty()).await;
+    let (_, v) = post_json(&addr, "running", &token, report.clone()).await;
+    assert_eq!(v["launch"], json!([1]));
+    let op = v["launchOp"].as_u64().expect("an operation id");
+    // A late answer to an earlier send (or none named) is not this send's.
+    for late in [json!(op.wrapping_add(1)), Value::Null] {
+        let mut ack = report.clone();
+        ack["launched"] = json!([1]);
+        ack["launchedOp"] = late;
+        post_json(&addr, "running", &token, ack).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!task.is_finished());
+    assert!(
+        lock(&l.released).is_empty(),
+        "nothing closes on another send's ack"
+    );
+    let mut ack = report;
+    ack["launched"] = json!([1]);
+    ack["launchedOp"] = json!(op);
+    post_json(&addr, "running", &token, ack).await;
+    assert_eq!(task.await.unwrap(), sent(vec![1], vec![]));
+    assert_eq!(*lock(&l.released), [vec![1]]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_send_gives_up_after_the_wait() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![9]));
+    peer_report(&r, "Mac", vec![], true);
+    let (_, no) = answering(Err("not a host".into()));
+    let got = r.send(&[9], "127.0.0.1", &no, &no).await;
+    assert_eq!(got, Err("Mac did not answer. Is RMI open there?".into()));
+    assert!(lock(&r.c.launches).is_empty() && lock(&r.c.acks).is_empty());
+    assert!(lock(&l.released).is_empty());
+}
+
+#[tokio::test]
+async fn queued_send_refuses_a_second_send_while_the_first_waits() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    let l = with_local(&r, Some(vec![]));
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = json!({"name": "Mac", "userIds": [], "canLaunch": true});
+    post_json(&addr, "running", &token, report.clone()).await;
+    let r2 = r.clone();
+    let first = tokio::spawn(async move {
+        let (_, no) = answering(Err("not a host".into()));
+        r2.send(&[1], "127.0.0.1", &no, &no).await
+    });
+    until("the send queued", || !lock(&r.c.launches).is_empty()).await;
+    // A second send there would take the first's place and its answer.
+    let (_, no) = answering(Err("not a host".into()));
+    let second = r.send(&[2], "127.0.0.1", &no, &no);
+    let second = tokio::time::timeout(Duration::from_secs(1), second).await;
+    let (_, v) = post_json(&addr, "running", &token, report.clone()).await;
+    assert_eq!(v["launch"], json!([1]));
+    let busy = "Mac is still taking the last accounts. Try again in a moment.";
+    assert_eq!(second, Ok(Err(busy.into())));
+    let mut ack = report;
+    ack["launched"] = json!([1]);
+    ack["launchedOp"] = v["launchOp"].clone();
+    post_json(&addr, "running", &token, ack).await;
+    assert_eq!(first.await.unwrap(), sent(vec![1], vec![]));
+    assert_eq!(*lock(&l.released), [vec![1]]);
+}
+
+#[tokio::test]
+async fn queued_send_is_not_asked_too_late_to_answer_in_time() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    with_local(&r, Some(vec![])); // unlocked: only the age keeps the ask back
+    let (addr, _stop) = serve_local(&r).await;
+    let token = paired_token(&r, &addr).await;
+    let report = json!({"name": "Mac", "userIds": [], "canLaunch": true});
+    post_json(&addr, "running", &token, report.clone()).await;
+    let r2 = r.clone();
+    let task = tokio::spawn(async move {
+        let (_, no) = answering(Err("not a host".into()));
+        r2.send(&[1], "127.0.0.1", &no, &no).await
+    });
+    until("the send queued", || !lock(&r.c.launches).is_empty()).await;
+    // Half the wait gone: its answer could come after the send gave up, launched there and
+    // never closed here.
+    for v in lock(&r.c.launches).values_mut() {
+        v.0 -= HANDOVER_WAIT / 2;
+    }
+    let (_, v) = post_json(&addr, "running", &token, report).await;
+    assert_eq!(v.get("launch"), None);
+    task.abort();
+}
+
+#[tokio::test]
+async fn send_closes_only_what_the_target_started() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![1, 2]));
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    r.note_host("100.64.0.3", "Laptop", vec![1, 2], true);
+    let (asked, ask) = answering(Ok(vec![1, 77])); // 77 was never asked for
+    let (pulled, pull) = answering(Ok(vec![1]));
+    assert_eq!(
+        r.send(&[1, 2], "100.64.0.2", &ask, &pull).await,
+        sent(vec![1], vec![])
+    );
+    assert_eq!(
+        *lock(&asked),
+        [("100.64.0.2".into(), "Office PC".into(), vec![1, 2])]
+    );
+    // Closed here and on the third computer, never on the target; 2 stays where it runs.
+    assert_eq!(*lock(&l.released), [vec![1]]);
+    assert_eq!(
+        *lock(&pulled),
+        [("100.64.0.3".into(), "Laptop".into(), vec![1])]
+    );
+    // 1 now on the target only, 2 still where it ran.
+    let mut left: Vec<(u64, String)> = r
+        .elsewhere()
+        .into_iter()
+        .map(|e| (e.user_id, e.ip))
+        .collect();
+    left.sort();
+    assert_eq!(left, [(1, "100.64.0.2".into()), (2, "100.64.0.3".into())]);
+}
+
+#[tokio::test]
+async fn send_lists_the_started_accounts_on_the_target_at_once() {
+    let (_d, r, _f) = setup(true);
+    with_local(&r, Some(vec![1]));
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    // The target also reports to this one.
+    let office = Report {
+        at: Instant::now(),
+        name: "Office PC".into(),
+        ids: vec![],
+        ip: "100.64.0.2".into(),
+        handover: true,
+        launch: true,
+    };
+    lock(&r.c.peers).insert("office".into(), office);
+    let (_, ask) = answering(Ok(vec![1]));
+    assert_eq!(
+        r.send(&[1], "100.64.0.2", &ask, &ask).await,
+        sent(vec![1], vec![])
+    );
+    // Before its next report: no second "Run on Office PC" (a second launch there).
+    assert_eq!(lock(&r.c.hosts)["100.64.0.2"].ids, [1]);
+    assert_eq!(lock(&r.c.peers)["office"].ids, [1]);
+}
+
+#[tokio::test]
+async fn send_says_which_accounts_still_run_where_they_were() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![1, 2]));
+    lock(&l.keep).push(1); // its close here fails
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    r.note_host("100.64.0.3", "Laptop", vec![3], true);
+    let (_, ask) = answering(Ok(vec![1, 2, 3]));
+    let (_, pull) = answering(Err("Could not reach Laptop.".into()));
+    assert_eq!(
+        r.send(&[1, 2, 3], "100.64.0.2", &ask, &pull).await,
+        sent(vec![1, 2, 3], vec![1, 3])
+    );
+    // 3 still runs on the Laptop: still in its report (Run here can still ask it).
+    assert_eq!(lock(&r.c.hosts)["100.64.0.3"].ids, [3]);
+}
+
+#[tokio::test]
+async fn send_refuses_accounts_whose_computer_cannot_let_go() {
+    let (_d, r, _f) = setup(true);
+    with_local(&r, Some(vec![]));
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    peer_report(&r, "Mac", vec![1], false); // an RMI without Run here runs 1
+    let (asked, ask) = answering(Ok(vec![1, 2]));
+    // 1 is not sent, and the UI can name the computer to update
+    assert_eq!(
+        r.send(&[1, 2], "100.64.0.2", &ask, &ask).await,
+        Ok(handover::Sent {
+            started: vec![2],
+            still: vec![],
+            old: Some("Mac".into()),
+        })
+    );
+    assert_eq!(lock(&asked)[0].2, [2]);
+    assert_eq!(
+        r.send(&[1], "100.64.0.2", &ask, &ask).await,
+        Err("Update RMI on Mac first.".into())
+    );
+    assert_eq!(lock(&asked).len(), 1);
+}
+
+#[tokio::test]
+async fn send_closes_on_a_third_computer_the_target_also_lists() {
+    let (_d, r, _f) = setup(true);
+    let r = Arc::new(r);
+    let l = with_local(&r, Some(vec![1]));
+    // The target already lists 1 and is listed first; the Mac (it reports to this one) runs it.
+    r.note_host("100.64.0.2", "Office PC", vec![1], true);
+    peer_report(&r, "Mac", vec![1], true);
+    let (pulled, pull) = answering(Ok(vec![1]));
+    let r2 = r.clone();
+    let task = tokio::spawn(async move {
+        let (_, ask) = answering(Ok(vec![1]));
+        r2.send(&[1], "100.64.0.2", &ask, &pull).await
+    });
+    until("the ask queued", || {
+        !lock(&r.c.wants).is_empty() || task.is_finished()
+    })
+    .await;
+    // The Mac is asked with its next report; the target never is.
+    let asked = lock(&r.c.wants).get("viewer").map(|w| w.1.clone());
+    assert_eq!(asked, Some(vec![1]));
+    deliver(&r, vec![1]);
+    peer_report(&r, "Mac", vec![], true);
+    r.c.tick.notify_waiters();
+    assert_eq!(task.await.unwrap(), sent(vec![1], vec![]));
+    assert!(lock(&pulled).is_empty());
+    assert_eq!(*lock(&l.released), [vec![1]]);
+}
+
+#[tokio::test]
+async fn send_to_an_older_rmi_closes_nothing() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![1]));
+    r.note_host("100.64.0.2", "Office PC", vec![], false);
+    let (asked, ask) = answering(Ok(vec![1]));
+    assert_eq!(
+        r.send(&[1], "100.64.0.2", &ask, &ask).await,
+        Err("Update RMI on Office PC first.".into())
+    );
+    assert_eq!(
+        r.send(&[1], "100.64.0.9", &ask, &ask).await,
+        Err("Could not reach that computer.".into())
+    );
+    assert!(lock(&asked).is_empty());
+    assert!(lock(&l.released).is_empty());
+}
+
+#[tokio::test]
+async fn send_refused_by_the_target_closes_nothing() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![1]));
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    let (_, locked) = answering(Err("RMI is locked on Office PC.".into()));
+    assert_eq!(
+        r.send(&[1], "100.64.0.2", &locked, &locked).await,
+        Err("RMI is locked on Office PC.".into())
+    );
+    let (_, none) = answering(Ok(vec![]));
+    assert_eq!(
+        r.send(&[1], "100.64.0.2", &none, &none).await,
+        Err(
+            "Office PC could not start those accounts. Check they are saved and signed in there."
+                .into()
+        )
+    );
+    assert!(lock(&l.released).is_empty());
+}
+
 #[test]
-fn release_closes_for_good() {
-    use crate::automation::relaunch::{Cfg, Obs};
-    use crate::platform::{Capabilities, Platform, RobloxInstall};
-    struct Plat(Arc<Mutex<Vec<String>>>);
-    impl Platform for Plat {
-        fn capabilities(&self) -> Capabilities {
-            Capabilities::default()
-        }
-        fn roblox_install(&self) -> Option<RobloxInstall> {
-            None
-        }
-        fn open_uri(&self, _: &str) -> std::io::Result<()> {
-            panic!("no real launches in tests")
-        }
-        fn tracked_clients(&self, t: &[String]) -> Vec<(u32, String)> {
-            let l = lock(&self.0);
+fn targets_list_only_computers_that_can_launch() {
+    let (_d, r, _f) = setup(true);
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    r.note_host("100.64.0.3", "Old PC", vec![], false);
+    peer_report(&r, "Mac", vec![], true);
+    let mut got = r.targets();
+    got.sort_by(|a, b| a.ip.cmp(&b.ip));
+    let t = |ip: &str, device: &str| handover::Target {
+        ip: ip.into(),
+        device: device.into(),
+    };
+    assert_eq!(got, [t("100.64.0.2", "Office PC"), t("127.0.0.1", "Mac")]);
+    for v in lock(&r.c.hosts).values_mut() {
+        v.at -= PEER_TTL;
+    }
+    assert_eq!(r.targets(), [t("127.0.0.1", "Mac")]);
+}
+
+/// Fake clients by tracker id; a `stuck` one survives its close.
+struct Plat(Arc<Mutex<Vec<String>>>, Vec<String>);
+
+impl crate::platform::Platform for Plat {
+    fn capabilities(&self) -> crate::platform::Capabilities {
+        crate::platform::Capabilities::default()
+    }
+    fn roblox_install(&self) -> Option<crate::platform::RobloxInstall> {
+        None
+    }
+    fn open_uri(&self, _: &str) -> std::io::Result<()> {
+        panic!("no real launches in tests")
+    }
+    fn tracked_clients(&self, t: &[String]) -> Option<Vec<(u32, String)>> {
+        let l = lock(&self.0);
+        Some(
             l.iter()
                 .filter(|c| t.contains(c))
                 .map(|c| (1, c.clone()))
-                .collect()
-        }
-        fn close_tracked(&self, t: &str) -> std::io::Result<usize> {
-            lock(&self.0).retain(|c| c != t);
-            Ok(1)
-        }
+                .collect(),
+        )
     }
-    let d = tempfile::tempdir().unwrap();
-    // Alice (user id 1, tracker 100000) and bob (2) both have a client here.
+    fn close_tracked(&self, t: &str) -> std::io::Result<usize> {
+        if !self.1.iter().any(|s| s == t) {
+            lock(&self.0).retain(|c| c != t);
+        }
+        Ok(1)
+    }
+}
+
+/// Alice (user id 1, account A, tracker 100000) and bob (2, B) both have a client here;
+/// `stuck` trackers survive a close.
+fn release_host(
+    d: &std::path::Path,
+    stuck: &[&str],
+) -> (
+    crate::automation::backend::tests::TH,
+    Arc<Mutex<Vec<String>>>,
+) {
     let live = Arc::new(Mutex::new(vec!["100000".into(), "200000".into()]));
-    let h = crate::automation::backend::tests::host_with(d.path(), Box::new(Plat(live.clone())));
-    let st = &h.0;
-    let obs = |up, exited| Obs {
+    let stuck = stuck.iter().map(|s| s.to_string()).collect();
+    let plat = Plat(live.clone(), stuck);
+    let h = crate::automation::backend::tests::host_with(d, Box::new(plat));
+    (h, live)
+}
+
+/// Alice's relaunch observation: socket `up`, client `exited`.
+fn alice(up: bool, exited: bool) -> crate::automation::relaunch::Obs {
+    crate::automation::relaunch::Obs {
         account: "Alice".into(),
-        cfg: Cfg {
+        cfg: crate::automation::relaunch::Cfg {
             enabled: true,
             delay: Duration::from_secs(5),
             ..Default::default()
@@ -525,7 +1138,126 @@ fn release_closes_for_good() {
         up,
         exited,
         ..Default::default()
+    }
+}
+
+/// Run on: accounts with a client here are kept from automated launches while the target
+/// joins (Roblox kicks the source), and given back if they stay.
+#[test]
+fn run_on_holds_the_accounts_here_until_the_answer() {
+    let d = tempfile::tempdir().unwrap();
+    let (h, _live) = release_host(d.path(), &[]);
+    let held = handover::hold(&h.0, &[1, 3]);
+    assert_eq!(
+        held.iter().map(|h| h.0).collect::<Vec<_>>(),
+        [1],
+        "3 is not saved here"
+    );
+    assert!(h.0.automation.handed_over("A"));
+    // locked meanwhile: still given back (a held account is never left paused)
+    let vault = lock(&h.0.vault).take();
+    handover::unhold(&h.0, &held);
+    assert!(!h.0.automation.handed_over("A"));
+    *lock(&h.0.vault) = vault;
+}
+
+/// More accounts than a paired computer takes at once: refused here, with a reason.
+#[tokio::test]
+async fn too_many_accounts_are_refused_up_front() {
+    let (_d, r, _f) = setup(true);
+    let many: Vec<u64> = (0..=MAX_RUNNING as u64).collect();
+    r.note_host("100.64.0.2", "Office PC", many.clone(), true);
+    let (asked, ask) = answering(Ok(vec![]));
+    assert_eq!(r.run_here(&many, &ask).await, Err(too_many()));
+    assert_eq!(
+        r.send(&many, "100.64.0.2", &ask, &ask).await,
+        Err(too_many())
+    );
+    assert!(lock(&asked).is_empty());
+}
+
+#[tokio::test]
+async fn send_gives_back_what_the_target_did_not_start() {
+    let (_d, r, _f) = setup(true);
+    let l = with_local(&r, Some(vec![1, 2]));
+    r.note_host("100.64.0.2", "Office PC", vec![], true);
+    let (_, ask) = answering(Ok(vec![1]));
+    let (_, pull) = answering(Ok(vec![]));
+    assert_eq!(
+        r.send(&[1, 2], "100.64.0.2", &ask, &pull).await,
+        sent(vec![1], vec![])
+    );
+    assert_eq!(
+        *lock(&l.held),
+        [(vec![1, 2], true), (vec![2], false)],
+        "held before the ask, 2 given back"
+    );
+    // Refused: everything given back, nothing closed.
+    lock(&l.held).clear();
+    let (_, none) = answering(Ok(vec![]));
+    assert!(r.send(&[2], "100.64.0.2", &none, &pull).await.is_err());
+    assert_eq!(*lock(&l.held), [(vec![2], true), (vec![2], false)]);
+    assert_eq!(*lock(&l.released), [vec![1]]);
+}
+
+#[test]
+fn release_leaves_an_account_this_computer_is_launching() {
+    let d = tempfile::tempdir().unwrap();
+    let (h, live) = release_host(d.path(), &[]);
+    // An RMI launch of Alice is queued or running here: closing now would not stop it.
+    h.0.automation.own_begin(&["A".into()]);
+    assert_eq!(handover::release(&h.0, &[1, 2]), Some(vec![2]));
+    assert_eq!(*lock(&live), ["100000"]);
+}
+
+#[tokio::test]
+async fn handed_over_account_is_not_started_again_by_automation() {
+    use crate::launch::launcher::{start_batch, HANDED_OVER};
+    use crate::launch::resolve::Bar;
+    let d = tempfile::tempdir().unwrap();
+    let (h, _live) = release_host(d.path(), &[]);
+    assert_eq!(handover::release(&h.0, &[1]), Some(vec![1]));
+    // Auto-relaunch, watcher reconnect, API: refused, nothing counted as running.
+    assert_eq!(
+        start_batch(&h, vec!["A".into()], Bar::default(), false, false),
+        Err(HANDED_OVER.into())
+    );
+    assert!(!h.0.automation.own_running("A"));
+    // A user's launch brings it back.
+    let home = Bar {
+        home: true,
+        ..Default::default()
     };
+    let b = start_batch(&h, vec!["A".into()], home, false, true).unwrap();
+    assert!(!h.0.automation.handed_over("A"));
+    // cancelled and ended here: no batch outlives the test on the shared launcher state
+    crate::launch::launcher::wait_launched(&b, Duration::ZERO, Duration::from_secs(5));
+}
+
+#[test]
+fn release_hands_a_survivor_back_to_auto_relaunch() {
+    let d = tempfile::tempdir().unwrap();
+    let (h, live) = release_host(d.path(), &["100000"]);
+    let st = &h.0;
+    let relaunch = || lock(&st.automation.relaunch);
+    let t0 = tokio::time::Instant::now();
+    relaunch().tick(t0, &[alice(true, false)], Duration::from_secs(9));
+    // Its close failed: still running here, so not released, and still watched.
+    assert_eq!(handover::release(st, &[1]), Some(vec![]));
+    assert_eq!(lock(&live).len(), 2);
+    assert!(!st.automation.handed_over("A"));
+    let t1 = t0 + Duration::from_secs(1);
+    relaunch().tick(t1, &[alice(false, true)], Duration::from_secs(9));
+    assert_ne!(relaunch().status("Alice", t1, 0)["pendingAt"], Value::Null);
+}
+
+/// The releasing computer: the client closes and auto-relaunch leaves it closed.
+#[test]
+fn release_closes_for_good() {
+    let d = tempfile::tempdir().unwrap();
+    let (h, live) = release_host(d.path(), &[]);
+    let st = &h.0;
+    let obs = alice;
     let relaunch = || lock(&st.automation.relaunch);
     let t0 = tokio::time::Instant::now();
     relaunch().tick(t0, &[obs(true, false)], Duration::from_secs(9));
@@ -901,6 +1633,27 @@ fn held_keys_and_buttons_released() {
     assert_eq!(lock(&rec).len(), 2, "released once");
 }
 
+/// The viewer's line ends arrive as `\n`: each one is an Enter press, not a typed line feed.
+#[test]
+fn typed_line_ends_press_enter() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let mut i = Rec(rec.clone());
+    Held::default().apply(&mut i, Ev::Text("hi\n\nyou\n".into()));
+    assert_eq!(
+        *lock(&rec),
+        [
+            "text hi",
+            "key Enter true",
+            "key Enter false",
+            "key Enter true",
+            "key Enter false",
+            "text you",
+            "key Enter true",
+            "key Enter false",
+        ]
+    );
+}
+
 /// Session end: the queued backlog (a long paste) is dropped, held keys still go up, and the
 /// thread ends so the caller can wait for it.
 #[test]
@@ -1039,9 +1792,56 @@ async fn hello_and_pairing_over_http() {
     assert_eq!(s.paired.len(), 1, "no duplicate");
     assert!(r.c.who(&token, "127.0.0.1").is_none());
     assert!(r.c.who(&token2, "127.0.0.1").is_some());
-    // removed: the token stops working
-    r.unpair(&s.paired[0].id);
+    // removed: the token stops working, and what it reported or was asked goes at once
+    let id = s.paired[0].id.clone();
+    peer_report(&r, "Mac", vec![9], true);
+    let rep = lock(&r.c.peers).remove("viewer").unwrap();
+    lock(&r.c.peers).insert(id.clone(), rep);
+    lock(&r.c.wants).insert(id.clone(), (Instant::now(), vec![9]));
+    lock(&r.c.launches).insert(id.clone(), (Instant::now(), vec![9]));
+    r.unpair(&id).await;
     assert!(r.c.who(&token2, "127.0.0.1").is_none());
+    assert!(r.elsewhere().is_empty() && r.targets().is_empty());
+    assert!(lock(&r.c.wants).is_empty() && lock(&r.c.launches).is_empty());
+}
+
+/// A `remote.json` that is there but cannot be read (held, no access) is not "no pairings":
+/// nothing is saved over it.
+#[tokio::test]
+async fn unreadable_store_file_is_never_saved_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(STORE_FILE);
+    std::fs::create_dir(&file).unwrap(); // a read error on every OS
+    std::fs::write(file.join("keep"), b"x").unwrap();
+    let r = Remote::new(
+        Arc::new(Mutex::new(json!({}))),
+        dir.path(),
+        Arc::new(Fake::default()),
+    );
+    assert!(r.c.unread);
+    r.unpair("nobody").await;
+    let snap = r.c.snap(&lock(&r.c.store));
+    assert!(r.c.write(snap).is_err());
+    assert!(file.join("keep").exists());
+}
+
+/// Two saves finishing out of order: the older change never lands over the newer one.
+#[test]
+fn store_saves_keep_the_newest_change() {
+    let (dir, r, _f) = setup(true);
+    let old = r.c.snap(&Store::default());
+    lock(&r.c.store).log.push(LogEntry {
+        peer: "Mac".into(),
+        started_at: "2026-01-01T00:00:00Z".into(),
+        duration_sec: 1,
+        control: false,
+        files: vec![],
+    });
+    let new = r.c.snap(&lock(&r.c.store));
+    r.c.write(new).unwrap();
+    r.c.write(old).unwrap();
+    let file = std::fs::read_to_string(dir.path().join(STORE_FILE)).unwrap();
+    assert!(file.contains("Mac"), "{file}");
 }
 
 /// Pair once, never again: the token survives restarts from its own IP only. An entry
@@ -1082,10 +1882,17 @@ fn unreadable_store_is_set_aside() {
     );
     assert!(r.status().paired.is_empty());
     assert!(!file.exists());
-    assert_eq!(
-        std::fs::read(dir.path().join("remote.json.bad")).unwrap(),
-        b"{ not json"
-    );
+    let bad: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("remote.json.bad-")
+        })
+        .collect();
+    assert_eq!(bad.len(), 1);
+    assert_eq!(std::fs::read(bad[0].path()).unwrap(), b"{ not json");
 }
 
 #[test]
@@ -1534,6 +2341,11 @@ fn upload_names_are_sanitised() {
         ("tab\there.txt", "tabhere.txt"),
         (".bashrc", ".bashrc"),
         ("x.txt:hidden", "x.txthidden"),
+        // bidi overrides and zero-width marks: no `invoiceexe.pdf` that is an .exe
+        ("report\u{202e}fdp.exe", "reportfdp.exe"),
+        ("a\u{200b}b\u{feff}.txt", "ab.txt"),
+        ("\u{2066}x\u{2069}.txt", "x.txt"),
+        ("\u{200d}keep.txt", "\u{200d}keep.txt"), // joiners stay, as in device names
     ] {
         assert_eq!(safe_name(raw), want, "{raw:?}");
     }
@@ -2439,6 +3251,7 @@ fn encoded_frames_are_never_dropped() {
 #[tokio::test(flavor = "multi_thread")]
 async fn h264_negotiated_and_keyframes_on_request() {
     if !h264::available() {
+        println!("skipped: no H.264 encoder on this machine");
         return; // nothing to negotiate on this machine
     }
     let (_d, r, fake) = setup(true);

@@ -27,6 +27,7 @@ import { useUi } from "@/app/store";
 import { toast } from "@/components/Toasts";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/features/home/EmptyState";
+import { useTargets } from "@/features/devices/elsewhere";
 import { usePlay } from "@/features/playbar/usePlay";
 import type { AccountView, AccountsList } from "@/lib/ipc";
 import { t } from "@/lib/i18n";
@@ -161,6 +162,17 @@ function Loaded({ list }: { list: AccountsList }) {
   });
   useEffect(() => v.measure(), [rowH, headH, v]);
 
+  // A search hides rows: selected accounts it hides leave the selection, so no entry point
+  // (Play bar, Inspector, menus, keys) acts on accounts the user can't see.
+  useEffect(() => {
+    if (!searching) return;
+    const cur = useUi.getState().sel;
+    const ids = cur.ids.filter((id) => order.includes(id));
+    if (ids.length < cur.ids.length) setSel({ ...cur, ids });
+  }, [searching, order, setSel]);
+  // targets cached before any row menu opens: its "Run on" item must not pop in after opening
+  useTargets();
+
   // Keep the keyboard cursor in view (not on a rows rebuild: a presence update must not snap back).
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
@@ -248,6 +260,15 @@ function Loaded({ list }: { list: AccountsList }) {
       if (ids.length) play(ids);
     } else if (k === "Delete" || (k === "Backspace" && e.metaKey)) {
       e.preventDefault();
+      if (!shown.length) return;
+      // the cursor moves to the next row left (the previous one at the end), not back to the top
+      const at = cursor && shown.includes(cursor) ? order.indexOf(cursor) : -1;
+      const left = (id: string) => !shown.includes(id);
+      const next =
+        at < 0
+          ? undefined
+          : (order.slice(at + 1).find(left) ?? order.slice(0, at).reverse().find(left));
+      if (next) setSel({ ids: [next], anchor: next, cursor: next });
       void act.remove(shown);
     } else if (k === "F2" && cursor) {
       e.preventDefault();
@@ -348,7 +369,7 @@ function Loaded({ list }: { list: AccountsList }) {
               </button>
             ) : (
               <kbd className="pointer-events-none absolute hidden @[34rem]:block top-1/2 right-2.5 -translate-y-1/2 font-sans text-12 text-text-3">
-                {isMac ? "⌘F" : "Ctrl F"}
+                {t(isMac ? "accounts.searchKeyMac" : "accounts.searchKey")}
               </kbd>
             )}
           </div>

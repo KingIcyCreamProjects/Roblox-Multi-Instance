@@ -591,6 +591,7 @@ fn esc(s: &str) -> String {
 pub fn router(ctx: Ctx) -> Router {
     Router::new()
         .route("/control", get(control))
+        .layer(axum::middleware::map_response(super::http::json_errors))
         .layer(axum::middleware::from_fn_with_state(
             ctx.clone(),
             super::guard,
@@ -605,6 +606,8 @@ const SEND_TIMEOUT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(10)
 };
+
+const PING_EVERY: Duration = Duration::from_secs(30);
 
 /// False when the send failed or timed out: the caller drops the client.
 async fn send(socket: &mut WebSocket, m: Message) -> bool {
@@ -651,11 +654,23 @@ async fn serve(ctx: Ctx, mut socket: WebSocket, q: HashMap<String, String>) {
         ctx.accepting.load(std::sync::atomic::Ordering::SeqCst) && ctx.token_ok(&token)
     }) {
         Ok(r) => r,
+        // Right token, server stopping or rebinding: try again, not "wrong token".
+        Err(UNAUTHORIZED) if ctx.token_ok(&token) => {
+            return close(socket, GOING_AWAY, "server stopping").await
+        }
         Err(UNAUTHORIZED) => return close(socket, UNAUTHORIZED, "unauthorized").await,
         Err(code) => return close(socket, code, "too many clients").await,
     };
+    // A ping now and then: a half-open LAN client (network gone) then fails at the TCP level
+    // and is dropped. ponytail: no idle deadline, a client that never pongs stays connected.
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if !send(&mut socket, Message::Ping(Default::default())).await {
+                    break;
+                }
+            }
             // Closed = the hub dropped this client (too slow, stop, regenerate): close now
             // instead of flushing its queue while inbound frames are already ignored.
             out = rx.recv() => match out.filter(|_| !rx.is_closed()) {

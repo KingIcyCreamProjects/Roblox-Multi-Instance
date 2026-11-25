@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
@@ -80,8 +80,21 @@ fn cookie_key(c: Option<&Secret>) -> u64 {
 impl RobloxClient {
     pub fn new(base: BaseUrls) -> Self {
         Self {
+            // Same-origin redirects only: a cross-host or https->http hop would resend a
+            // secret body (307/308) and the CSRF token; the 3xx is then an error.
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::custom(|a| {
+                    let off = a
+                        .previous()
+                        .last()
+                        .is_some_and(|p| p.origin() != a.url().origin());
+                    if off || a.previous().len() > 5 {
+                        a.stop()
+                    } else {
+                        a.follow()
+                    }
+                }))
                 .build()
                 .expect("reqwest client builds"),
             cdn: reqwest::Client::builder()
@@ -99,7 +112,12 @@ impl RobloxClient {
 
     /// Sleeps out the host's shared 429 cooldown, if any.
     async fn wait_cooldown(&self, host: &str) {
-        let until = self.cooldown.lock().unwrap().get(host).copied();
+        let until = self
+            .cooldown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(host)
+            .copied();
         if let Some(t) = until.filter(|t| *t > tokio::time::Instant::now()) {
             tokio::time::sleep_until(t).await;
         }
@@ -108,13 +126,13 @@ impl RobloxClient {
     /// Pushes the host's cooldown out to `now + ms` (never pulls it in).
     fn back_off(&self, host: &str, ms: u64) {
         let t = tokio::time::Instant::now() + Duration::from_millis(ms);
-        let mut g = self.cooldown.lock().unwrap();
+        let mut g = self.cooldown.lock().unwrap_or_else(PoisonError::into_inner);
         let e = g.entry(host.to_owned()).or_insert(t);
         *e = (*e).max(t);
     }
 
     pub fn set_ratelimit_hook(&self, h: RateLimitHook) {
-        *self.hook.lock().unwrap() = Some(h);
+        *self.hook.lock().unwrap_or_else(PoisonError::into_inner) = Some(h);
     }
 
     pub async fn get_json<T: DeserializeOwned>(
@@ -214,19 +232,19 @@ impl RobloxClient {
         .await
     }
 
-    /// POST that may rotate the session: also returns a new `.ROBLOSECURITY` from `Set-Cookie`.
-    pub async fn post_json_rotating<T: DeserializeOwned>(
+    /// POST that may rotate the session: the new `.ROBLOSECURITY` from `Set-Cookie`, if any.
+    /// The body is not read: an odd reply must never lose a cookie Roblox already issued.
+    pub async fn post_rotating(
         &self,
         host: &str,
         path: &str,
         body: &serde_json::Value,
         cookie: &Secret,
-    ) -> Result<(T, Option<Secret>)> {
+    ) -> Result<Option<Secret>> {
         let r = self
             .send(Method::POST, host, path, Some(body), &[], Some(cookie))
             .await?;
-        let n = new_session_cookie(r.headers());
-        Ok((decode(r).await?, n))
+        Ok(new_session_cookie(r.headers()))
     }
 
     /// Unauthenticated POST that signs in: the new `.ROBLOSECURITY` from `Set-Cookie`, if any.
@@ -245,10 +263,7 @@ impl RobloxClient {
 
     /// Image bytes from the Roblox CDN (https `*.rbxcdn.com` only, no cookie, ≤ 4 MB).
     pub async fn get_cdn(&self, url: &str) -> Result<Vec<u8>> {
-        let u = reqwest::Url::parse(url).map_err(|e| RobloxError::Decode(e.to_string()))?;
-        if u.scheme() != "https" || !u.host_str().is_some_and(|h| h.ends_with(".rbxcdn.com")) {
-            return Err(RobloxError::Decode("unexpected image host".into()));
-        }
+        let u = cdn_url(url).ok_or_else(|| RobloxError::Decode("unexpected image host".into()))?;
         self.limiter.acquire("cdn", 120).await;
         let r = self
             .cdn
@@ -307,6 +322,8 @@ impl RobloxClient {
                     .await;
             }
             self.limiter.acquire(host, HOST_PER_MIN).await;
+            // a 429 elsewhere while this waited in the limiter: its backoff holds here too
+            self.wait_cooldown(host).await;
             let mut rb = http.request(method.clone(), &url);
             if let Some(c) = cookie {
                 let mut v = HeaderValue::from_str(&format!(".ROBLOSECURITY={}", c.expose()))
@@ -315,7 +332,12 @@ impl RobloxClient {
                 rb = rb.header(reqwest::header::COOKIE, v);
             }
             if method != Method::GET {
-                if let Some(t) = self.csrf.lock().unwrap().get(&key) {
+                if let Some(t) = self
+                    .csrf
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&key)
+                {
                     rb = rb.header("x-csrf-token", t);
                 }
             }
@@ -337,7 +359,10 @@ impl RobloxClient {
                     .get("x-csrf-token")
                     .and_then(|v| v.to_str().ok())
                 {
-                    self.csrf.lock().unwrap().insert(key, t.to_string());
+                    self.csrf
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(key, t.to_string());
                     csrf_retried = true;
                     continue;
                 }
@@ -355,7 +380,11 @@ impl RobloxClient {
                     .map_or(0, |s| s.saturating_mul(1000).min(MAX_RETRY_AFTER_MS));
                 let ms = (500u64 << (tries - 1)).min(30_000).max(retry_after)
                     + rand::random_range(0..250u64);
-                let hook = self.hook.lock().unwrap().clone();
+                let hook = self
+                    .hook
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
                 if let Some(h) = hook {
                     h(host, ms);
                 }
@@ -364,7 +393,11 @@ impl RobloxClient {
                 continue;
             }
             if status == StatusCode::UNAUTHORIZED && cookie.is_some() {
-                self.csrf.lock().unwrap().remove(&key); // dead cookie: its token too
+                // dead cookie: its token too
+                self.csrf
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&key);
                 return Err(RobloxError::Unauthorized);
             }
             if status == StatusCode::FORBIDDEN {
@@ -378,7 +411,15 @@ impl RobloxClient {
                 }
             }
             if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
+                // Only the start is kept: never read a huge error body whole.
+                let (mut resp, mut b) = (resp, Vec::new());
+                while b.len() < 4096 {
+                    match resp.chunk().await {
+                        Ok(Some(c)) => b.extend_from_slice(&c),
+                        _ => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&b[..b.len().min(4096)]);
                 return Err(RobloxError::Status {
                     code: status.as_u16(),
                     body_snippet: text.chars().take(200).collect(),
@@ -387,6 +428,15 @@ impl RobloxClient {
             return Ok(resp);
         }
     }
+}
+
+/// `s` as a URL if it is https on a `*.rbxcdn.com` host (Roblox images), else `None`.
+pub fn cdn_url(s: &str) -> Option<reqwest::Url> {
+    let u = reqwest::Url::parse(s).ok()?;
+    // subdomains only: the CSP allows `https://*.rbxcdn.com` images, not the bare host
+    let host = u.host_str().is_some_and(|h| h.ends_with(".rbxcdn.com"));
+    (u.scheme() == "https" && host && u.username().is_empty() && u.password().is_none())
+        .then_some(u)
 }
 
 /// Body bytes, `Decode(too_big)` past `cap`.
@@ -556,6 +606,41 @@ mod tests {
         let url = format!("http://{}", l.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         (RobloxClient::new(BaseUrls::all(&url)), m)
+    }
+
+    #[tokio::test]
+    async fn authenticated_post_never_follows_a_cross_host_redirect() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let other = Router::new().route(
+            "/x",
+            any(move || async move {
+                h2.fetch_add(1, SeqCst);
+                Json(json!({}))
+            }),
+        );
+        let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let to = format!("http://{}/x", l2.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l2, other).await.unwrap() });
+        let app = Router::new().route(
+            "/r",
+            any(move || {
+                let to = to.clone();
+                async move { (StatusCode::TEMPORARY_REDIRECT, [("location", to)]) }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = RobloxClient::new(BaseUrls::all(&url));
+        let r = c
+            .post_json::<Value>("www", "/r", &json!({"pw": "x"}), Some(&Secret::new("good")))
+            .await;
+        assert!(
+            matches!(r, Err(RobloxError::Status { code: 307, .. })),
+            "{r:?}"
+        );
+        assert_eq!(hits.load(SeqCst), 0);
     }
 
     #[tokio::test]
@@ -933,6 +1018,8 @@ value",
         for u in [
             "http://tr.rbxcdn.com/a",
             "https://rbxcdn.com/a",
+            "https://user@tr.rbxcdn.com/a",
+            "https://u:p@tr.rbxcdn.com/a",
             "https://evil.com/x.rbxcdn.com",
             "https://rbxcdn.com.evil.io/a",
             "not a url",
@@ -940,6 +1027,7 @@ value",
             let e = c.get_cdn(u).await.unwrap_err();
             assert!(matches!(e, RobloxError::Decode(_)), "{u}");
         }
+        assert!(cdn_url("https://tr.rbxcdn.com/a").is_some());
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 fn main() {
-    // Only the `main` capability grants these; other webviews (login-*) can call none.
+    // The `main` capability grants these; `remote-indicator` grants only remote_status and
+    // remote_stop; login-* and site-* windows get none.
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "settings_get",
@@ -117,6 +118,8 @@ fn main() {
             "remote_forget",
             "remote_elsewhere",
             "remote_run_here",
+            "remote_targets",
+            "remote_send",
             "homelab_latest",
             "homelab_download",
             "tool_block",

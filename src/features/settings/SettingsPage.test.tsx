@@ -112,6 +112,39 @@ test("reset to defaults asks first, then drafts the defaults for Save", async ()
   });
 });
 
+test("reset to defaults leaves sections this OS hides alone", async () => {
+  const user = userEvent.setup();
+  await mockCall("settings_set", { patch: { remote: { enabled: true } } });
+  Object.assign(mockCaps, { os: "linux" }); // no remote access hosting here
+  setup();
+  await screen.findByRole("switch", { name: t("set.tray.enabled") });
+  await user.click(screen.getByRole("button", { name: t("settings.resetAll") }));
+  await user.click(screen.getByRole("button", { name: t("settings.resetYes") }));
+  expect(screen.getByText(t("settings.saved"))).toBeInTheDocument();
+});
+
+test("Launch on login names draft on every keystroke: Save is ready at once", async () => {
+  const user = userEvent.setup();
+  setup();
+  const box = await screen.findByRole("textbox", { name: t("set.startup.accounts") });
+  expect(box).toHaveAttribute("data-pii"); // account names blur in privacy mode
+  await user.type(box, "Main");
+  expect(screen.getByText(t("settings.unsaved1"))).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: t("settings.save") })).toBeEnabled();
+});
+
+test("two features on one port: said on the row, Save waits", async () => {
+  const user = userEvent.setup();
+  setup();
+  await tab(user, "control");
+  const ws = await screen.findByRole("spinbutton", { name: t("set.ws.port") });
+  const api = screen.getByRole("spinbutton", { name: t("set.api.port") });
+  await user.clear(api);
+  await user.type(api, (ws as HTMLInputElement).value);
+  expect(await screen.findAllByText(t("set.portClash"))).toHaveLength(2);
+  expect(screen.getByRole("button", { name: t("settings.save") })).toBeDisabled();
+});
+
 test("search groups hits by group name; a click jumps to the setting", async () => {
   const user = userEvent.setup();
   setup();
@@ -280,6 +313,10 @@ test("import sends the picked file and its password", async () => {
   const f = within(btn.closest("form")!);
   await user.type(f.getByLabelText(t("vs.exportPassword")), "export pass");
   await user.click(btn);
+  // every account is replaced: asks first, like Restore
+  expect(f.getByText(t("vs.import.ask"))).toBeInTheDocument();
+  expect(mockVault.lastArgs.vault_import_file).toBeUndefined();
+  await user.click(f.getByRole("button", { name: t("vs.importBtn") }));
   expect(await f.findByText(t("vs.imported"))).toBeInTheDocument();
   expect(mockVault.lastArgs.vault_import_file).toEqual({
     path: "/mock/picked.rmiv",
@@ -478,13 +515,21 @@ test("on Linux without Sober, launch-gated rows show the Install Sober reason", 
   expect(screen.getAllByText(why).length).toBeGreaterThan(0);
 });
 
-test("the friend remote section is hidden where clients can't be tracked (Linux)", async () => {
+test("the friend remote section is hidden where the watcher capability is off", async () => {
   const user = userEvent.setup();
-  Object.assign(mockCaps, { os: "linux", watcher: false });
+  Object.assign(mockCaps, { watcher: false });
   setup();
   await tab(user, "control");
   await screen.findByRole("heading", { name: t("sec.control") });
   expect(screen.queryByRole("heading", { name: t("sec.friend") })).toBeNull();
+});
+
+test("Linux with its watcher shows the friend remote section", async () => {
+  const user = userEvent.setup();
+  Object.assign(mockCaps, { os: "linux", watcher: true });
+  setup();
+  await tab(user, "control");
+  expect(await screen.findByRole("heading", { name: t("sec.friend") })).toBeInTheDocument();
 });
 
 test("the friend remote section shows where clients are tracked (Windows)", async () => {

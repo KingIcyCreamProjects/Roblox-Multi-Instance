@@ -227,7 +227,15 @@ export function useAccountActions() {
       collapsed: new Set([...u.collapsed].map(ren)),
       selGroup: u.selGroup === from ? to : u.selGroup,
     }));
-    await saving(qc, call("group_rename", { from, to })).catch(resync);
+    await saving(qc, call("group_rename", { from, to })).catch((e: unknown) => {
+      // `to` did not exist before, so mapping it back restores exactly what changed
+      const back = (g: string) => (g === to ? from : g);
+      useUi.setState((u) => ({
+        collapsed: new Set([...u.collapsed].map(back)),
+        selGroup: u.selGroup === to ? from : u.selGroup,
+      }));
+      return resync(e);
+    });
   };
 
   /** `null` clears. Resolves true once saved. */

@@ -16,7 +16,7 @@ pub type AddGate = Arc<dyn Fn() -> bool + Send + Sync>;
 use protocol::ApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -285,7 +285,13 @@ pub struct Automation {
     /// Account id -> (RMI launch batches running, grace end after the last one). Their own
     /// replace-previous close and fresh client are not crashes to auto-relaunch.
     own: Mutex<HashMap<String, (u32, Option<tokio::time::Instant>)>>,
+    /// Account ids another computer took (Run here there, Run on): automated launches here
+    /// stay off them until a user's launch.
+    handed: Mutex<HashSet<String>>,
     running: tokio::sync::Mutex<Option<Running>>,
+    /// The ports/LAN a wanted bind (Start, startup, resume, a rebind) last failed on: a settings
+    /// save that changes them retries it. Cleared by Stop, a disable, or a good bind.
+    failed: Mutex<Option<Net>>,
     /// The saved token was loaded, saved or given up on this session (once only).
     token_loaded: Mutex<bool>,
     /// Server status may have changed (bind, stop, a server task ended); the app turns it
@@ -317,10 +323,30 @@ impl Automation {
             },
             relaunch: Mutex::default(),
             own: Mutex::default(),
+            handed: Mutex::default(),
             running: tokio::sync::Mutex::new(None),
+            failed: Mutex::default(),
             token_loaded: Mutex::default(),
             status_changed: Arc::default(),
         }
+    }
+
+    /// Another computer runs these accounts now: no automated launch of them here.
+    pub fn hand_over(&self, ids: &[String]) {
+        let mut g = self.handed.lock().unwrap_or_else(PoisonError::into_inner);
+        g.extend(ids.iter().cloned());
+    }
+
+    /// Automated launches may start these accounts here again (a user launched them, or
+    /// they never left).
+    pub fn take_back(&self, ids: &[String]) {
+        let mut g = self.handed.lock().unwrap_or_else(PoisonError::into_inner);
+        g.retain(|i| !ids.contains(i));
+    }
+
+    pub fn handed_over(&self, id: &str) -> bool {
+        let g = self.handed.lock().unwrap_or_else(PoisonError::into_inner);
+        g.contains(id)
     }
 
     /// A launch batch with these accounts started. Also forgets ended graces.
@@ -533,29 +559,48 @@ impl Automation {
         }
         if !run.as_ref().is_some_and(Running::up) {
             self.shutdown(&mut run).await;
-            *run = Some(self.bind().await?);
+            *run = Some(self.bind_noted().await?);
         }
         Ok(self.status_of(&run))
     }
 
     pub async fn stop(&self) -> Status {
         let mut run = self.running.lock().await;
+        *self.failed() = None;
         self.shutdown(&mut run).await;
         self.status_of(&run)
     }
 
+    fn failed(&self) -> std::sync::MutexGuard<'_, Option<Net>> {
+        self.failed.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `bind`, remembering the config it failed on (for `reconcile`).
+    async fn bind_noted(&self) -> Result<Running, String> {
+        let cfg = self.net();
+        let r = self.bind().await;
+        *self.failed() = r.as_ref().err().map(|_| cfg);
+        r
+    }
+
     /// After a settings change: stop when automation got disabled, rebind when
-    /// ports or the LAN toggle changed or one server died. Does nothing while stopped.
+    /// ports or the LAN toggle changed or one server died, or bind again after a failed
+    /// bind once ports or LAN changed. Does nothing while stopped.
     pub async fn reconcile(&self) -> Result<(), String> {
         let mut run = self.running.lock().await;
-        let Some(r) = run.as_ref() else {
-            return Ok(());
+        let failed = *self.failed();
+        let net = self.net();
+        let rebind = match run.as_ref() {
+            Some(r) => r.cfg != net || !r.up(),
+            None => failed.is_some_and(|f| f != net),
         };
-        let enabled = self.ctx.flag("/automation/enabled");
-        if !enabled || r.cfg != self.net() || !r.up() {
-            self.shutdown(&mut run).await;
-            if enabled {
-                *run = Some(self.bind().await?);
+        if run.is_some() || failed.is_some() {
+            if !self.ctx.flag("/automation/enabled") {
+                *self.failed() = None;
+                self.shutdown(&mut run).await;
+            } else if rebind {
+                self.shutdown(&mut run).await;
+                *run = Some(self.bind_noted().await?);
             }
         }
         Ok(())
@@ -771,6 +816,29 @@ mod tests {
             let s = a.start().await.unwrap();
             assert!(s.ws_running && s.api_running && s.ws_port == p, "{s:?}");
         }
+    }
+
+    /// A rebind onto a taken port fails and stops; a later save that moves the port binds again.
+    #[tokio::test]
+    async fn failed_rebind_is_retried_by_a_later_port_change() {
+        let a = testkit::automation(serde_json::json!({}));
+        a.start().await.unwrap();
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = held.local_addr().unwrap().port();
+        a.ctx.settings.lock().unwrap()["api"]["port"] = serde_json::json!(taken);
+        assert!(a.reconcile().await.is_err());
+        assert!(!a.status().await.api_running);
+        // Same taken port again (an unrelated save): no retry, no new error.
+        assert!(a.reconcile().await.is_ok());
+        a.ctx.settings.lock().unwrap()["api"]["port"] = serde_json::json!(0);
+        a.reconcile().await.unwrap();
+        let s = a.status().await;
+        assert!(s.ws_running && s.api_running, "{s:?}");
+        // Stopped by hand: a save never starts it.
+        a.stop().await;
+        a.ctx.settings.lock().unwrap()["api"]["port"] = serde_json::json!(taken);
+        a.reconcile().await.unwrap();
+        assert!(!a.status().await.api_running);
     }
 
     #[test]

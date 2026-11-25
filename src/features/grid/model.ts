@@ -1,4 +1,18 @@
-import type { GridLayout } from "@/lib/ipc";
+import type { GridLayout, GridSuggestion } from "@/lib/ipc";
+import { t } from "@/lib/i18n";
+
+/** A suggestion's card label from the catalog (same rules as Rust `suggest`); Rust's English
+ * label only for a layout this does not know. `count` = windows the suggestion was made for. */
+export function layoutLabel({ layout: l, label }: GridSuggestion, count: number): string {
+  if (l.type === "single") return t("grid.l.single");
+  if (l.type === "cascade") return t("grid.l.cascade");
+  if (l.type === "focus") return t("grid.l.focus", { n: count - 1 });
+  if (l.type !== "rows") return label;
+  const [k, ...rest] = l.counts;
+  if (!rest.length) return k === 2 ? t("grid.l.side") : t("grid.l.across", { n: k });
+  if (rest.every((r) => r === k)) return t("grid.l.grid", { k, rows: l.counts.length });
+  return l.counts.join(" + ");
+}
 
 /** Same layout by type + its own fields. Saved settings come back key-sorted and deep-merged
  * (stale keys of an earlier layout type), so JSON text never compares. */

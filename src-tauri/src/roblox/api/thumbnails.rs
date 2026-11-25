@@ -9,8 +9,16 @@ pub struct Thumb {
     pub target_id: u64,
     /// "Completed", "Pending", "Blocked", ...; `image_url` is only usable when Completed.
     pub state: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "cdn_only")]
     pub image_url: Option<String>,
+}
+
+/// Image URLs reach the UI only as https `*.rbxcdn.com` (same check as `get_cdn`).
+fn cdn_only<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let s: Option<String> = Deserialize::deserialize(d)?;
+    Ok(s.filter(|s| crate::roblox::client::cdn_url(s).is_some()))
 }
 
 #[derive(Deserialize)]
@@ -84,6 +92,7 @@ pub async fn headshots_by_token(
         struct B {
             request_id: String,
             state: String,
+            #[serde(default, deserialize_with = "cdn_only")]
             image_url: Option<String>,
         }
         #[derive(Deserialize)]
@@ -246,6 +255,28 @@ mod tests {
         );
         let t = game_thumbs(&c, &[1, 2]).await.unwrap();
         assert_eq!((t[&1].as_str(), t.len()), ("https://tr.rbxcdn.com/t1", 1));
+    }
+
+    #[test]
+    fn only_rbxcdn_https_urls_kept() {
+        let t = |u: &str| {
+            serde_json::from_value::<Thumb>(
+                json!({"targetId": 1, "state": "Completed", "imageUrl": u}),
+            )
+            .unwrap()
+            .image_url
+        };
+        assert_eq!(
+            t("https://tr.rbxcdn.com/a").as_deref(),
+            Some("https://tr.rbxcdn.com/a")
+        );
+        for bad in [
+            "http://tr.rbxcdn.com/a",
+            "https://evil.io/x",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(t(bad), None, "{bad}");
+        }
     }
 
     #[tokio::test]

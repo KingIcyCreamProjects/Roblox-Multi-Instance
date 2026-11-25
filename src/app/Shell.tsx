@@ -6,6 +6,7 @@ import { namesHidden, useAccounts } from "@/features/accounts/useAccounts";
 import { t } from "@/lib/i18n";
 import { AutomationPage } from "@/features/automation/AutomationPage";
 import { toast, Toaster } from "@/components/Toasts";
+import { Button } from "@/components/ui/Button";
 import { AccountSheets, AccountsScreen } from "@/features/accounts/AccountsScreen";
 import { ReauthSheet } from "@/features/accounts/Reauth";
 import { Discover } from "@/features/discover/Discover";
@@ -20,7 +21,7 @@ import { Palette } from "./Palette";
 import { Tabs, tabOrder } from "./Tabs";
 import { TitleBar } from "./TitleBar";
 import { useSettings, useSetSettings } from "./useSettings";
-import { useUi } from "./store";
+import { keyLetter, useUi } from "./store";
 
 export function useApplyAppearance() {
   const { data: s } = useSettings();
@@ -69,13 +70,9 @@ function TosNote() {
       className="glass-panel mx-7 mb-2 flex items-center gap-4 rounded-panel px-4 py-2 text-13 text-text-2"
     >
       <p className="flex-1">{t("tos.note")}</p>
-      <button
-        type="button"
-        className="rounded-control px-2 py-1 text-13 font-semibold text-text-1 hover:bg-surface-3"
-        onClick={() => set.mutate({ onboarding: { tosSeen: true } })}
-      >
+      <Button variant="ghost" sm onClick={() => set.mutate({ onboarding: { tosSeen: true } })}>
         {t("tos.dismiss")}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -102,13 +99,9 @@ export function ErrorBanner({
       {!queryError && more > 0 && (
         <span className="shrink-0 text-text-3">{t("error.more", { n: more })}</span>
       )}
-      <button
-        type="button"
-        className="rounded-control px-2 py-1 text-13 font-semibold text-text-1 hover:bg-surface-3"
-        onClick={queryError ? retry : () => setError(null)}
-      >
+      <Button variant="ghost" sm onClick={queryError ? retry : () => setError(null)}>
         {queryError ? t("error.retry") : t("error.dismiss")}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -119,7 +112,7 @@ const start = { done: false, route: useUi.getState().route };
 let recoveredShown = false;
 
 export function Shell() {
-  useApplyAppearance();
+  // appearance: App applies it (gates included); the Shell always renders inside App
   useWhatsNew();
   // once per app start (a lock/unlock remounts the Shell): corrupt settings were reset
   const { data: info } = useQuery({ queryKey: ["info"], queryFn: () => call("app_info") });
@@ -192,7 +185,7 @@ export function Shell() {
   // Ctrl/Cmd+Shift+H toggles privacy mode (same as the title-bar eye).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.key.toLowerCase() !== "h" || !s) return;
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || keyLetter(e) !== "h" || !s) return;
       e.preventDefault();
       setSettings({ ui: { showUsernames: !s.ui.showUsernames } });
     };

@@ -159,7 +159,19 @@ pub fn link_of(public_url: &str) -> Result<String, String> {
     if !u.to_ascii_lowercase().starts_with("https://") {
         return Err("Public address must start with https://".into());
     }
+    // What `host_ok` accepts: a browser sends no user name in Host, so such a link never works.
+    if public_host(u).is_none() {
+        return Err("Public address must be https://host or https://host:port".into());
+    }
     Ok(u.to_owned())
+}
+
+/// `(host, explicit port)` of an https publicUrl without user info, parsed by the url crate.
+fn public_host(public_url: &str) -> Option<(String, Option<u16>)> {
+    let u = url::Url::parse(public_url.trim()).ok()?;
+    let ok = u.scheme() == "https" && u.username().is_empty() && u.password().is_none();
+    ok.then(|| Some((u.host_str()?.to_owned(), u.port())))
+        .flatten()
 }
 
 /// OS-wrapped token and password in the data dir.
@@ -283,8 +295,10 @@ struct Ctx {
     settings: Arc<Mutex<Value>>,
     /// Times of recent failed logins per client IP (the brute-force window).
     fails: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
-    /// Last Disconnect/Reconnect per account id.
+    /// Last Disconnect/Reconnect per account id, the friend's and the owner's apart: the
+    /// owner acting on an unshared account must not turn the friend's 404 into a 429.
     actions: Arc<Mutex<HashMap<String, Instant>>>,
+    owner_actions: Arc<Mutex<HashMap<String, Instant>>>,
     /// Bound port (loopback Host check).
     port: Arc<AtomicU16>,
     /// Rejected Host values already logged.
@@ -393,9 +407,8 @@ fn username(s: &Value) -> String {
 
 /// `/friend/ownerUsername`: the owner's own login name, if set (trimmed, 1 to 32 chars).
 /// That login sees and controls every account, not only the shared ones.
-/// ponytail: no settings row yet: the name is set in settings.json, and its password
-/// (`friend-owner-password.bin`) changes only when that file is deleted. Add the row and a
-/// "New password" for it when more than the app's author uses this.
+/// Its password and token (`friend-owner-*.bin`) change only when those files are deleted:
+/// there is no "New password" for this login yet (owner decision, see docs/friend-remote.md).
 fn owner_username(s: &Value) -> Option<String> {
     s.pointer("/friend/ownerUsername")
         .and_then(Value::as_str)
@@ -428,8 +441,12 @@ struct Running {
 pub struct Friend {
     ctx: Ctx,
     running: tokio::sync::Mutex<Option<Running>>,
-    /// The saved token and password were loaded or saved this session (once only).
+    /// The saved token and password were loaded or saved this session (once only). Held
+    /// across keyring and file IO: blocking threads only.
     token_loaded: Mutex<bool>,
+    /// Copy of `token_loaded` for `password` / `owner_password` (async threads never wait on
+    /// a keyring prompt).
+    ready: AtomicBool,
 }
 
 impl Friend {
@@ -449,6 +466,7 @@ impl Friend {
                 settings,
                 fails: Arc::default(),
                 actions: Arc::default(),
+                owner_actions: Arc::default(),
                 port: Arc::default(),
                 bad_hosts: Arc::default(),
                 xff_logged: Arc::default(),
@@ -460,6 +478,7 @@ impl Friend {
             },
             running: tokio::sync::Mutex::new(None),
             token_loaded: Mutex::default(),
+            ready: AtomicBool::default(),
         }
     }
 
@@ -512,7 +531,7 @@ impl Friend {
     /// Secret: the friend password, for the owner to view or copy.
     pub fn password(&self) -> Result<String, String> {
         // An unsaved in-memory password would stop working after a restart.
-        if !*self.loaded() {
+        if !self.ready.load(Ordering::SeqCst) {
             return Err("The friend password isn't ready yet. Try again in a moment.".into());
         }
         Ok(read_secret(&self.ctx.password))
@@ -520,7 +539,7 @@ impl Friend {
 
     /// Secret: the owner login's password (same rule as `password`).
     pub fn owner_password(&self) -> Result<String, String> {
-        if !*self.loaded() {
+        if !self.ready.load(Ordering::SeqCst) {
             return Err("The owner password isn't ready yet. Try again in a moment.".into());
         }
         Ok(read_secret(&self.ctx.owner_password))
@@ -551,6 +570,7 @@ impl Friend {
             .secrets()
             .into_iter()
             .all(|(file, cell, valid)| load_or_save(&root.join(file), cell, valid, &*os));
+        self.ready.store(*done, Ordering::SeqCst);
     }
 
     /// New password and token (old ones get 401 from the next request on), saved OS-wrapped;
@@ -560,13 +580,16 @@ impl Friend {
         let mut done = self.loaded();
         let os = os();
         // Not loaded yet (remote off at startup, or a keyring error): load the owner login's
-        // saved secrets first, or `ensure_token` never will once this marks them loaded.
-        if let (false, Ok(os)) = (*done, &os) {
-            for (file, cell, valid) in self.secrets().into_iter().skip(2) {
-                load_or_save(&root.join(file), cell, valid, &**os);
-            }
-        }
-        *done = true;
+        // saved secrets first. Marked loaded only if they were: else `ensure_token` retries all
+        // four later (the friend's two it then reads back are the new ones saved below).
+        *done = *done
+            || os.as_ref().is_ok_and(|os| {
+                self.secrets()
+                    .into_iter()
+                    .skip(2)
+                    .all(|(file, cell, valid)| load_or_save(&root.join(file), cell, valid, &**os))
+            });
+        self.ready.store(*done, Ordering::SeqCst);
         write_secret(&self.ctx.token, new_token());
         self.ctx.drop_add(); // the signed-out friend's code must not add anything
         write_secret(&self.ctx.password, random_password());
@@ -787,24 +810,14 @@ pub(crate) async fn harden(mut res: Response) -> Response {
     res
 }
 
-/// `host[:port]` of a URL ("" if none).
-fn authority(url: &str) -> &str {
-    let u = url.trim();
-    let u = u.split_once("://").map_or(u, |(_, r)| r);
-    u.split(['/', '?', '#']).next().unwrap_or_default()
-}
-
-/// DNS-rebinding guard: Host must be publicUrl's host (with or without its port) or
+/// DNS-rebinding guard: Host must be publicUrl's host (with or without its explicit port) or
 /// loopback on the bound port. publicUrl read live; empty means loopback only.
 fn host_ok(host: &str, public_url: &str, port: u16) -> bool {
     let host = host.trim();
-    let public = authority(public_url);
-    let bare = public
-        .rsplit_once(':')
-        .filter(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-        .map_or(public, |(h, _)| h);
-    let public_ok = !public.is_empty()
-        && (host.eq_ignore_ascii_case(public) || host.eq_ignore_ascii_case(bare));
+    let public_ok = public_host(public_url).is_some_and(|(h, p)| {
+        host.eq_ignore_ascii_case(&h)
+            || p.is_some_and(|p| host.eq_ignore_ascii_case(&format!("{h}:{p}")))
+    });
     public_ok
         || ["127.0.0.1", "localhost", "[::1]"]
             .iter()
@@ -856,8 +869,8 @@ fn client_key(h: &HeaderMap) -> (String, bool) {
 
 /// One Disconnect/Reconnect per account per `COOLDOWN`. The slot is taken up front (so
 /// parallel requests can't slip past) and handed back if the action fails.
-fn take_slot(c: &Ctx, id: &str) -> ApiResult<()> {
-    let mut m = c.actions.lock().unwrap_or_else(PoisonError::into_inner);
+fn take_slot(c: &Ctx, owner: bool, id: &str) -> ApiResult<()> {
+    let mut m = c.slots(owner);
     let now = Instant::now();
     m.retain(|_, t| now.duration_since(*t) < COOLDOWN);
     if m.contains_key(id) {
@@ -871,14 +884,22 @@ fn take_slot(c: &Ctx, id: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn give_back<T>(c: &Ctx, id: &str, r: ApiResult<T>) -> ApiResult<T> {
+fn give_back<T>(c: &Ctx, owner: bool, id: &str, r: ApiResult<T>) -> ApiResult<T> {
     if r.is_err() {
-        c.actions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(id);
+        c.slots(owner).remove(id);
     }
     r
+}
+
+impl Ctx {
+    fn slots(&self, owner: bool) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+        let m = if owner {
+            &self.owner_actions
+        } else {
+            &self.actions
+        };
+        m.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 async fn auth(State(c): State<Ctx>, mut req: Request, next: Next) -> Response {
@@ -982,8 +1003,13 @@ async fn disconnect(
     Extension(Owner(owner)): Extension<Owner>,
     Path(id): Path<String>,
 ) -> Res {
-    take_slot(&c, &id)?;
-    give_back(&c, &id, c.backend.friend_disconnect(&id, owner).await)?;
+    take_slot(&c, owner, &id)?;
+    give_back(
+        &c,
+        owner,
+        &id,
+        c.backend.friend_disconnect(&id, owner).await,
+    )?;
     Ok(Json(json!({})).into_response())
 }
 
@@ -1004,9 +1030,10 @@ async fn reconnect(
         Err(JsonRejection::MissingJsonContentType(_)) => ReconnectBody::default(),
         Err(e) => return Err(body_err(e)),
     };
-    take_slot(&c, &id)?;
+    take_slot(&c, owner, &id)?;
     let batch = give_back(
         &c,
+        owner,
         &id,
         c.backend.friend_reconnect(&id, body.link, owner).await,
     )?;
@@ -1215,20 +1242,26 @@ async fn finish_add(c: Ctx, code: String, key: Zeroizing<String>, gen: u64) {
     drop(g);
 }
 
-/// Stop the pending add (Roblox is told too, best effort).
+/// Stop the pending add (Roblox is told too, best effort). Confirmed and signing in: dropped,
+/// so `finish_add`'s gate refuses the vault write and signs the new session out (unless the
+/// write already happened).
 async fn add_cancel(State(c): State<Ctx>, Extension(o): Extension<Owner>) -> Res {
     friend_only(o)?;
     c.allow_add()?;
-    let code = {
+    let (code, linked) = {
         let mut g = c.add_slot();
         match g.as_mut() {
             Some(p) if matches!(p.state, AddState::Waiting(_)) => {
                 p.state = AddState::Cancelled;
-                Some(p.code.clone())
+                (Some(p.code.clone()), false)
             }
-            _ => None,
+            Some(p) => (None, matches!(p.state, AddState::Linked(_))),
+            None => (None, false),
         }
     };
+    if linked {
+        c.drop_add();
+    }
     if let Some(code) = code {
         if let Err(e) = c.backend.friend_add_cancel(&code).await {
             log::debug!("friend: add cancel not sent: {}", e.message);
@@ -1403,6 +1436,10 @@ mod tests {
         assert!(host_ok("x.ts.net", "https://x.ts.net", 1));
         assert!(!host_ok("x.ts.net:443", "https://x.ts.net", 1));
         assert!(!host_ok("", "", 1));
+        // User info: no browser sends it in Host, so the link is refused up front.
+        assert!(!host_ok("x.ts.net", "https://user@x.ts.net", 1));
+        assert!(link_of("https://user@x.ts.net").is_err());
+        assert!(host_ok("x.ts.net:8443", "https://x.ts.net:8443/path", 1));
     }
 
     #[tokio::test]
@@ -1460,6 +1497,23 @@ mod tests {
         assert_eq!(raw_get(&f, "/web/app.js").await.status(), 404);
         // Login sits outside /v1 auth.
         assert_eq!(login(&f, "friend", &pw(&f)).await.0, 200);
+    }
+
+    /// Server strings (account and game names) reach the page through textContent only.
+    #[test]
+    fn app_js_has_no_html_sinks() {
+        let code = APP_JS.lines().filter(|l| !l.trim_start().starts_with("//"));
+        for line in code {
+            for sink in [
+                "innerHTML",
+                "outerHTML",
+                "insertAdjacentHTML",
+                "document.write",
+                "eval(",
+            ] {
+                assert!(!line.contains(sink), "{sink}: {line}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1598,6 +1652,9 @@ mod tests {
         assert_eq!(s, 404);
         let (s, _) = call(&f, "POST", "/v1/accounts/B/disconnect", Some(&t)).await;
         assert_eq!(s, 200);
+        // The owner's cooldown on Bob does not show the friend that Bob exists (429 vs 404).
+        let (s, _) = call(&f, "POST", "/v1/accounts/B/disconnect", Some(&bearer(&f))).await;
+        assert_eq!(s, 404);
         // Owner username cleared: the owner token stops working at once.
         f.ctx.settings.lock().unwrap()["friend"]["ownerUsername"] = json!("");
         assert_eq!(call(&f, "GET", "/v1/accounts", Some(&t)).await.0, 401);
@@ -2013,6 +2070,23 @@ mod tests {
         assert_ne!(own, f.password().unwrap());
     }
 
+    /// "New password" during a keyring error does not mark the owner login's saved secrets
+    /// loaded: a later load still brings the saved owner password back.
+    #[test]
+    fn new_password_on_keyring_error_keeps_the_saved_owner_login() {
+        let d = tempfile::tempdir().unwrap();
+        let (_h, f) = setup(d.path(), Box::new(NoPlat));
+        f.ensure_token(d.path(), fake_os);
+        let own = f.owner_password().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let (_h2, g) = setup(d2.path(), Box::new(NoPlat));
+        let new = g.new_password(d.path(), || Err("cancelled".into()));
+        assert!(g.owner_password().is_err(), "owner login not loaded yet");
+        g.ensure_token(d.path(), fake_os);
+        assert_eq!(g.owner_password().unwrap(), own);
+        assert_eq!(g.password().unwrap(), new);
+    }
+
     #[test]
     fn secret_files_replaced_only_when_missing_or_bad() {
         for file in [TOKEN_FILE, PASSWORD_FILE] {
@@ -2424,7 +2498,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_gate_rechecked_before_vault_write() {
-        for case in ["canAdd off", "new password", "remote off"] {
+        for case in ["canAdd off", "new password", "remote off", "cancel"] {
             let d = tempfile::tempdir().unwrap();
             let (h, f, r) = setup_add(d.path()).await;
             let before = accounts(&h);
@@ -2432,6 +2506,8 @@ mod tests {
             match case {
                 "canAdd off" => f.ctx.settings.lock().unwrap()["friend"]["canAdd"] = json!(false),
                 "remote off" => f.ctx.settings.lock().unwrap()["friend"]["enabled"] = json!(false),
+                // Cancel (or closing the sheet) after the friend confirmed stops it too.
+                "cancel" => drop(call(&f, "POST", "/v1/add/cancel", Some(&bearer(&f))).await),
                 _ => drop(f.new_password(d.path(), fake_os)),
             }
             drop(hold);
@@ -2443,7 +2519,7 @@ mod tests {
             assert_eq!(accounts(&h), before, "{case}");
             assert_eq!(cookie_of(&h, 50), None, "{case}");
             match slot_state(&f) {
-                None => assert_eq!(case, "new password"),
+                None => assert!(matches!(case, "new password" | "cancel"), "{case}"),
                 Some(s) => assert_eq!(
                     s,
                     json!({ "status": "failed", "message": "The owner has not turned on adding accounts." }),

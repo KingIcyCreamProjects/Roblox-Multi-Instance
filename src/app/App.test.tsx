@@ -1,6 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast, useToasts } from "@/components/Toasts";
+import { useUi } from "./store";
 import { call, VAULT_LOCKED_EVENT } from "@/lib/ipc";
 import { mockCall, mockVault, resetVaultMock } from "@/lib/mock";
 import { t } from "@/lib/i18n";
@@ -80,6 +82,29 @@ test("Ctrl+L locks from the shell", async () => {
   expect(await screen.findByLabelText(t("vault.password"))).toBeInTheDocument();
 });
 
+test("lock clears pasted cookie text, toasts and cached account data", async () => {
+  const user = userEvent.setup();
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <App />
+    </QueryClientProvider>,
+  );
+  await create(user);
+  expect(await screen.findByText(t("empty.signIn"))).toBeInTheDocument();
+  act(() => {
+    useUi.getState().openAdd("cookies", "_|WARNING:-DO-NOT-SHARE-THIS.--|_secret");
+    toast("shown at lock time");
+  });
+  expect(qc.getQueryData(["accounts"])).toBeDefined();
+  await mockCall("vault_lock");
+  window.dispatchEvent(new Event(VAULT_LOCKED_EVENT));
+  expect(await screen.findByLabelText(t("vault.password"))).toBeInTheDocument();
+  expect(useUi.getState().add).toMatchObject({ open: false, prefill: "", prefillFor: null });
+  expect(useToasts.getState().items).toEqual([]);
+  expect(qc.getQueryData(["accounts"])).toBeUndefined();
+});
+
 test("a command failing with the locked error swaps the gate to Unlock", async () => {
   const user = userEvent.setup();
   setup();
@@ -135,7 +160,7 @@ test("damaged vault: restore a backup, then the normal Unlock screen", async () 
   await user.click(screen.getByRole("button", { name: t("vault.damaged.restore") }));
   await user.type(screen.getByLabelText(t("vault.damaged.pw")), "wrong pass");
   const pick = await screen.findByRole("button", {
-    name: `${t("vault.damaged.pick")} vault-20260101-120000.rmiv`,
+    name: t("vault.damaged.pickOf", { name: "vault-20260101-120000.rmiv" }),
   });
   await user.click(pick);
   expect(await screen.findByText(t("vault.err.wrong"))).toBeInTheDocument();

@@ -123,14 +123,24 @@ export function ToolsSheet() {
       return guard(fn).finally(() => {
         const n = (m.get(k) ?? 1) - 1;
         if (n) m.set(k, n);
-        else m.delete(k);
+        else {
+          m.delete(k);
+          setRefused(false);
+        }
       });
     },
     [guard],
   );
 
+  /** A close was refused while an op runs: closing would unmount its pane and lose the result. */
+  const [refused, setRefused] = useState(false);
   const close = (o: boolean) => {
-    if (!o) setPin(null);
+    if (!o && pin) {
+      // the op only waits for a PIN: closing cancels it ("nothing changed"), nothing is lost
+      setPin(null);
+    } else if (!o && inflight.current.has(selKey)) {
+      return setRefused(true);
+    }
     useUi.setState({ toolsOpen: o });
   };
 
@@ -148,6 +158,11 @@ export function ToolsSheet() {
               <Header accounts={accounts} />
               {single && <PinChip id={accounts[0].id} />}
             </div>
+            {refused && (
+              <p role="status" className="mb-4 text-13 text-text-2">
+                {t("tools.stillWorking")}
+              </p>
+            )}
             {!ready && (
               <div role="alert" className="mb-5 flex flex-col items-start gap-2">
                 <p className="text-13 text-text-1">{t("tools.signFirstBody")}</p>

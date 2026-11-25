@@ -37,12 +37,15 @@ let inFlight = false;
 /** Spec §11.4: folder → detected files → old password (locked only) → preview → import → results. */
 export function ImportSheet() {
   const open = useUi((u) => u.importOpen);
+  // a close was refused mid-step: say why until the step ends
+  const [refused, setRefused] = useState(false);
   return (
     <Sheet
       open={open}
       // no close (X, Esc, overlay) mid-step: the flow would unmount and drop the results
       onOpenChange={(o) => {
         if (o || !inFlight) useUi.setState({ importOpen: o });
+        else setRefused(true);
       }}
       title={t("imp.title")}
       description={t("imp.body")}
@@ -50,12 +53,24 @@ export function ImportSheet() {
       centered
     >
       {/* content unmounts on close, so every open starts fresh and the password is gone */}
-      <Flow onClose={() => useUi.setState({ importOpen: false })} />
+      <Flow
+        onClose={() => useUi.setState({ importOpen: false })}
+        refused={refused}
+        onSettled={() => setRefused(false)}
+      />
     </Sheet>
   );
 }
 
-function Flow({ onClose }: { onClose: () => void }) {
+function Flow({
+  onClose,
+  refused,
+  onSettled,
+}: {
+  onClose: () => void;
+  refused: boolean;
+  onSettled: () => void;
+}) {
   const qc = useQueryClient();
   const pathId = useId();
   const pwId = useId();
@@ -87,6 +102,7 @@ function Flow({ onClose }: { onClose: () => void }) {
     } finally {
       inFlight = false;
       setBusy(null);
+      onSettled();
     }
   };
   const look = (p: string) =>
@@ -102,7 +118,10 @@ function Flow({ onClose }: { onClose: () => void }) {
         favorites: d.favorites,
       });
     });
+  // the folder dialog is open: a second click must not open another
+  const [picking, setPicking] = useState(false);
   const browse = async () => {
+    setPicking(true);
     try {
       const r = await call("import_pick_folder");
       if (r) {
@@ -111,6 +130,8 @@ function Flow({ onClose }: { onClose: () => void }) {
       }
     } catch (e) {
       setErr(errMessage(e));
+    } finally {
+      setPicking(false);
     }
   };
 
@@ -197,6 +218,8 @@ function Flow({ onClose }: { onClose: () => void }) {
         <div className="flex gap-2">
           <input
             id={pathId}
+            // the folder path usually holds the Windows user name
+            data-pii
             value={path}
             onChange={(e) => {
               setPath(e.target.value);
@@ -210,7 +233,7 @@ function Flow({ onClose }: { onClose: () => void }) {
             // fixed while any step runs: a detect or preview can't land on a newer folder
             disabled={!!busy}
           />
-          <Button onClick={() => void browse()} className="shrink-0" disabled={!!busy}>
+          <Button onClick={() => void browse()} className="shrink-0" disabled={!!busy || picking}>
             <FolderOpen size={16} strokeWidth={1.75} />
             {t("imp.browse")}
           </Button>
@@ -232,7 +255,7 @@ function Flow({ onClose }: { onClose: () => void }) {
               <label key={k} className="flex items-start gap-2.5 text-13">
                 <input
                   type="checkbox"
-                  className="mt-0.5"
+                  className="mt-0.5 size-4 accent-[var(--accent)]"
                   checked={use[k]}
                   disabled={broken || !!preview || !!busy}
                   onChange={(e) => setUse({ ...use, [k]: e.target.checked })}
@@ -303,6 +326,11 @@ function Flow({ onClose }: { onClose: () => void }) {
       {err && (
         <p role="alert" className="text-13 text-error">
           {err}
+        </p>
+      )}
+      {refused && busy && (
+        <p role="status" className="text-13 text-text-2">
+          {t("imp.busy")}
         </p>
       )}
 
@@ -395,6 +423,7 @@ function Pick({
                   aria-label={r.alias || r.username}
                   checked={sel.has(r.key)}
                   onChange={() => toggle(r.key)}
+                  className="size-4 accent-[var(--accent)]"
                 />
                 <span
                   data-pii
@@ -412,7 +441,7 @@ function Pick({
                     {t("imp.willUpdate")}
                   </span>
                 )}
-                <span className="w-24 shrink-0 truncate text-right text-12 text-text-3">
+                <span data-pii className="w-24 shrink-0 truncate text-right text-12 text-text-3">
                   {r.group}
                 </span>
               </li>

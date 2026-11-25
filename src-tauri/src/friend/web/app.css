@@ -1,4 +1,4 @@
-/* RMI Remote: same glass family as the desktop app (tokens.css values). No inline styles, no data: URLs (CSP). */
+/* RMI Remote: same glass family as the desktop app, but not its exact tokens.css values (accent, glass, text-2/3, error and away differ). No inline styles, no data: URLs (CSP). */
 :root {
   color-scheme: dark;
   --graphite: 20 21 25;

@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { t } from "@/lib/i18n";
 import * as ipc from "@/lib/ipc";
-import { mockCall, mockRemote, resetVaultMock } from "@/lib/mock";
+import { mockCall, mockRemote, mockVault, resetVaultMock } from "@/lib/mock";
 import { dur, filesLine, RemoteExtras, size } from "./RemoteSection";
 
 beforeEach(() => resetVaultMock());
@@ -63,13 +63,45 @@ test("a code that was used (or burned) disappears; Windows gets the firewall hin
   expect(screen.getByRole("button", { name: t("rs.showCode") })).toBeInTheDocument();
 });
 
-test("remove forgets a paired computer", async () => {
+test("remove asks first, like the Devices page, then forgets a paired computer", async () => {
   const user = userEvent.setup();
   setup();
-  await user.click(
-    await screen.findByRole("button", { name: t("rs.removeNamed", { name: "Laptop" }) }),
-  );
+  const remove = { name: t("rs.removeNamed", { name: "Laptop" }) };
+  await user.click(await screen.findByRole("button", remove));
+  expect(screen.getByText(t("rs.removeAsk", { name: "Laptop" }))).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: t("set.cancel") }));
+  expect(mockVault.lastArgs.remote_unpair).toBeUndefined();
+  await user.click(screen.getByRole("button", remove));
+  await user.click(screen.getByRole("button", { name: t("rs.remove") }));
   expect(await screen.findByText(t("rs.noPaired"))).toBeInTheDocument();
+});
+
+test("a failed Stop or Remove says why and keeps the session and pairing", async () => {
+  const user = userEvent.setup();
+  mockRemote.session = { peer: "Laptop", since: "2026-11-02T18:30:00Z", control: true };
+  const orig = ipc.call;
+  const spy = vi
+    .spyOn(ipc, "call")
+    .mockImplementation((cmd, args) =>
+      cmd === "remote_stop" || cmd === "remote_unpair"
+        ? Promise.reject(new Error(`${cmd} failed`))
+        : orig(cmd, args as never),
+    );
+  try {
+    setup();
+    const live = await screen.findByText(t("rs.liveControl", { peer: "Laptop" }));
+    await user.click(screen.getByRole("button", { name: t("rs.stop") }));
+    expect(await screen.findByText("remote_stop failed")).toBeInTheDocument();
+    expect(live).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: t("rs.removeNamed", { name: "Laptop" }) }));
+    await user.click(screen.getByRole("button", { name: t("rs.remove") }));
+    expect(await screen.findByText("remote_unpair failed")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("rs.removeNamed", { name: "Laptop" }) }),
+    ).toBeEnabled();
+  } finally {
+    spy.mockRestore();
+  }
 });
 
 test("a live session shows who, and Stop ends it", async () => {

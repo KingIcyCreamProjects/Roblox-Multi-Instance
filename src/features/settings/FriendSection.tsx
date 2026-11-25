@@ -4,6 +4,7 @@ import { Copy, Eye, EyeOff } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useSetSettings, useSettings } from "@/app/useSettings";
 import { Button } from "@/components/ui/Button";
+import { IconButton } from "@/components/ui/IconButton";
 import { useAccountActions, useAccounts } from "@/features/accounts/useAccounts";
 import { label } from "@/features/accounts/model";
 import { openExternal } from "@/lib/events";
@@ -35,10 +36,12 @@ export const ownerNameClash = (owner: unknown, friend: unknown) => {
 };
 
 /** One "what to send" line: label, value, then its buttons. */
-function Row({ name, children }: { name: string; children: ReactNode }) {
+function Row({ name, pii, children }: { name: string; pii?: boolean; children: ReactNode }) {
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1">
-      <span className="w-24 shrink-0 text-13 text-text-2">{name}</span>
+      <span data-pii={pii || undefined} className="w-24 shrink-0 text-13 text-text-2">
+        {name}
+      </span>
       {children}
     </div>
   );
@@ -74,15 +77,15 @@ function PwLine({
       <code data-pii className="min-w-[24ch] font-mono text-13 text-text-1 select-text">
         {show && pw ? pw : DOTS}
       </code>
-      <Button
-        sm
-        variant="ghost"
-        aria-label={t(show ? "friend.hidePw" : "friend.showPw")}
+      {/* the vault password field's reveal pattern: the tooltip is its name */}
+      <IconButton
+        className="size-7"
+        label={t(show ? "friend.hidePw" : "friend.showPw")}
         aria-pressed={show}
         onClick={reveal}
       >
         {show ? <EyeOff {...iconBtn} /> : <Eye {...iconBtn} />}
-      </Button>
+      </IconButton>
       {/* Rust copies it: hidden from clipboard history, cleared after 30 s and on lock */}
       <Button
         sm
@@ -120,12 +123,14 @@ export function FriendExtras() {
   const urlUnsaved = useDraft((d) => "friend.publicUrl" in d.edits);
   const noUrl = !s?.friend.publicUrl.trim();
   const linkWhy = urlUnsaved ? t("friend.linkUnsaved") : noUrl ? t("friend.linkNoUrl") : null;
-  const { data: link } = useQuery({
+  const { data: link, error: linkErr } = useQuery({
     queryKey: ["friendLink", s?.friend.publicUrl],
     queryFn: () => call("friend_link"),
     enabled: !linkWhy,
     meta: { silent: true },
   });
+  // Rust refuses a saved address it can't use (not https): say why instead of "…" forever
+  const why = linkWhy ?? (linkErr && !link ? errMessage(linkErr) : null);
   const user = s?.friend.username ?? "";
   const ownerName = s?.friend.ownerUsername.trim() ?? "";
   // the remote is off: these controls do nothing yet, so the block dims like its catalog rows
@@ -134,10 +139,28 @@ export function FriendExtras() {
   const set = useSetSettings();
   const tsMade = RMI_MADE.test(s?.friend.publicUrl.trim() ?? "");
   // Funnel entry off first, then the address: the gate shows the setup again
-  const tsOff = () =>
+  const [offBusy, setOffBusy] = useState(false);
+  const tsOff = () => {
+    if (offBusy) return;
+    setOffBusy(true);
     void call("friend_ts_disable")
-      .then(() => set.mutateAsync({ friend: { publicUrl: "", enabled: false } }))
-      .catch(fail);
+      .then(
+        () =>
+          set.mutateAsync({ friend: { publicUrl: "", enabled: false } }).then(
+            // drafted friend edits would turn it back on with the next Save
+            () =>
+              useDraft.setState(({ edits }) => {
+                const rest = { ...edits };
+                delete rest["friend.enabled"];
+                delete rest["friend.publicUrl"];
+                return { edits: rest };
+              }),
+            () => {}, // the shared mutation cache already shows it in the banner
+          ),
+        fail,
+      )
+      .finally(() => setOffBusy(false));
+  };
   const copyText = (text: string, done: string) =>
     void navigator.clipboard.writeText(text).then(ok(done), fail);
 
@@ -156,7 +179,7 @@ export function FriendExtras() {
           sm
           disabled={!!linkWhy}
           aria-label={t("friend.copy")}
-          aria-describedby={linkWhy ? "friend-link-why" : undefined}
+          aria-describedby={why ? "friend-link-why" : undefined}
           onClick={() =>
             void call("friend_link")
               .then((s) => navigator.clipboard.writeText(s))
@@ -166,9 +189,9 @@ export function FriendExtras() {
           <Copy {...iconBtn} />
           {t("friend.copyBtn")}
         </Button>
-        {linkWhy && (
+        {why && (
           <span id="friend-link-why" className="text-13 text-text-3">
-            {linkWhy}
+            {why}
           </span>
         )}
       </Row>
@@ -233,7 +256,7 @@ export function FriendExtras() {
               <Copy {...iconBtn} />
               {t("friend.invite")}
             </Button>
-            <Button sm disabled={!link} onClick={() => link && void openExternal(link)}>
+            <Button sm disabled={!link} onClick={() => link && void openExternal(link).catch(fail)}>
               {t("friend.open")}
             </Button>
             {/* signs the friend out: asks first, like Regenerate token */}
@@ -241,7 +264,13 @@ export function FriendExtras() {
               {t("friend.newPw")}
             </Button>
             {tsMade && (
-              <Button sm variant="ghost" title={t("friend.tsOff.d")} onClick={tsOff}>
+              <Button
+                sm
+                variant="ghost"
+                title={t("friend.tsOff.d")}
+                disabled={offBusy}
+                onClick={tsOff}
+              >
                 {t("friend.tsOff")}
               </Button>
             )}
@@ -251,7 +280,7 @@ export function FriendExtras() {
       {ownerName && (
         <>
           <SubHeading>{t("friend.ownerPassword")}</SubHeading>
-          <Row name={ownerName}>
+          <Row name={ownerName} pii>
             <PwLine
               get="friend_owner_password"
               copy="friend_owner_password_copy"
