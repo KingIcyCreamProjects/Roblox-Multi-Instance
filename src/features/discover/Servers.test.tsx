@@ -25,6 +25,12 @@ const wrap = () =>
       </Tooltip.Provider>
     </QueryClientProvider>,
   );
+/** End-of-test cleanup. On a slow machine the mock stream has already ended and Stop is gone. */
+const stopStream = async (user: ReturnType<typeof userEvent.setup>) => {
+  const stop = screen.queryByRole("button", { name: t("servers.stop") });
+  if (stop) await user.click(stop);
+};
+
 const page = () =>
   Number(
     screen.queryByText(/servers, loading page \d+/)?.textContent?.match(/page (\d+)/)?.[1] ?? 0,
@@ -60,7 +66,7 @@ test("the active JobId survives new pages and a sort", async () => {
   expect(server).toMatch(/^[0-9a-f-]{36}$/);
   expect(picked!.endsWith(server)).toBe(true);
   expect(usePlayBar.getState().mode).toBe("specific");
-  await user.click(screen.getByRole("button", { name: t("servers.stop") }));
+  await stopStream(user);
 });
 
 test("Use this server sends the place the search ran in", async () => {
@@ -131,7 +137,7 @@ test("Set server, then join is busy while the reservations run", async () => {
   await act(async () => finish({ batchId: "b1" }));
   expect(launchBusy()).toBe(false);
   spy.mockRestore();
-  await user.click(screen.getByRole("button", { name: t("servers.stop") }));
+  await stopStream(user);
 });
 
 test("Load regions works again right after a refresh while an older load is still running", async () => {
@@ -180,5 +186,5 @@ test("Set server, then join starts a reserved batch", async () => {
   await waitFor(() =>
     expect(useToasts.getState().items.map((x) => x.message)).toContain(t("servers.reserveStarted")),
   );
-  await user.click(screen.getByRole("button", { name: t("servers.stop") }));
+  await stopStream(user);
 });
