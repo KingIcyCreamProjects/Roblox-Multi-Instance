@@ -16,6 +16,25 @@ export type Update = {
 
 export const UPDATES: Update[] = [
   {
+    version: "1.0.4",
+    date: "2026-11-25",
+    title: "Run on another computer",
+    summary:
+      "Send a running account from this computer to one you paired, the other direction of Run here. Plus a round of fixes across the app.",
+    added: [
+      {
+        text: "Run on: send one account or a selection to a computer you paired. This computer closes it while that one launches it. Both computers need this version.",
+        to: "devices",
+      },
+    ],
+    improved: [
+      "A move that goes wrong now says what happened: which accounts stayed, which closed but did not start, and when the other computer needs an update first.",
+      "Settings warns when two features are set to the same port, and tells you when a server could not start.",
+      "Clearing recent games asks first.",
+      "Adding accounts takes at most 200 at a time and an import file at most 5,000, with a clear message past that.",
+    ],
+  },
+  {
     version: "1.0.3",
     date: "2026-11-17",
     title: "Updates install themselves",
